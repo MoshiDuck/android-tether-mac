@@ -25,6 +25,17 @@ macOS has no built-in RNDIS driver, and kext-based drivers such as HoRNDIS no lo
 
 ## Install
 
+### Homebrew (recommended)
+
+```sh
+brew install MoshiDuck/tap/android-tether-mac
+tethermac-install        # asks for your password once; installs the service + menu bar icon
+```
+
+Update later with `brew upgrade android-tether-mac && tethermac-install`.
+
+### From source
+
 ```sh
 brew install libusb
 git clone https://github.com/MoshiDuck/android-tether-mac.git && cd android-tether-mac
@@ -61,10 +72,19 @@ Log file when installed as a service: `/var/log/rndis-tether.log`.
 4. IPv4 packets are copied between the phone and a `utun` interface; Ethernet headers are added/stripped in userspace.
 5. The menu bar app talks to the root service through two files in `/Users/Shared` (`rndis-tether.disabled`, `rndis-tether.status`).
 
+## Compatibility
+
+| Phone | Android | USB id (tethering) | Status |
+|-------|---------|--------------------|--------|
+| Samsung Galaxy S24 Ultra (SM-S928B) | Android 16, One UI 8 | `04e8:6864` | Tested: DHCP, DNS, HTTPS, reconnect |
+| Anything else | — | — | **Untested** — reports welcome |
+
+This has only been tested on a **Samsung Galaxy S24 Ultra**. Other phones should work if they expose RNDIS, but may need adjustments — please [open an issue](https://github.com/MoshiDuck/android-tether-mac/issues) with your model and `sudo ./rndis-tether -v -r -a` output so the table can grow.
+
 ## Limitations
 
 - IPv4 only (IPv6 is ignored; apps fall back to IPv4)
-- Tested on a Samsung phone (`04e8:6864`); other devices may need adjustments
+- DHCP lease renewal (every half lease, ~30 min) has not been observed over a full lease yet
 - If the service is killed with `kill -9`, the routes `0.0.0.0/1` and `128.0.0.0/1` may remain: `sudo route -n delete -net 0.0.0.0/1` and `128.0.0.0/1`
 
 ## Contributing

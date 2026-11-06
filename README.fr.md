@@ -10,6 +10,17 @@ macOS n'a pas de pilote RNDIS intégré, et les kexts comme HoRNDIS ne se charge
 
 ## Installation
 
+### Homebrew (recommandé)
+
+```sh
+brew install MoshiDuck/tap/android-tether-mac
+tethermac-install        # demande ton mot de passe ; installe le service + l'icône
+```
+
+Mise à jour : `brew upgrade android-tether-mac && tethermac-install`.
+
+### Depuis les sources
+
 ```sh
 brew install libusb
 git clone https://github.com/MoshiDuck/android-tether-mac.git && cd android-tether-mac
@@ -38,7 +49,8 @@ Journal du service : `/var/log/rndis-tether.log`.
 ## Limites
 
 - IPv4 uniquement
-- Testé sur un Samsung (`04e8:6864`)
+- Testé uniquement sur un **Samsung Galaxy S24 Ultra** (`04e8:6864`). Les autres téléphones ne sont pas testés : les retours sont les bienvenus (issue avec modèle et sortie de `sudo ./rndis-tether -v -r -a`)
+- Le renouvellement DHCP (à mi-bail, ~30 min) n'a pas encore été observé sur un bail complet
 - Si le service est tué avec `kill -9`, les routes `0.0.0.0/1` et `128.0.0.0/1` peuvent rester : `sudo route -n delete -net 0.0.0.0/1` et `128.0.0.0/1`
 - Si le téléphone propose CDC-NCM/ECM, macOS le gère déjà nativement
 
