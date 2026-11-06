@@ -20,7 +20,10 @@ REPO=MoshiDuck/android-tether-mac
 
 [ -f "$FORMULA" ] || { echo "Formule introuvable : $FORMULA" >&2; exit 1; }
 [ "$(git rev-parse --abbrev-ref HEAD)" = main ] || { echo "Passe sur la branche main." >&2; exit 1; }
-git diff --quiet && git diff --cached --quiet || { echo "Des modifications ne sont pas commitées." >&2; exit 1; }
+if ! git diff --quiet || ! git diff --cached --quiet; then
+    echo "Des modifications ne sont pas commitées." >&2
+    exit 1
+fi
 git rev-parse "v$VER" >/dev/null 2>&1 && { echo "Le tag v$VER existe déjà." >&2; exit 1; }
 
 echo "==> Tag v$VER"

@@ -1,0 +1,56 @@
+name: Bug report
+description: Something does not work as expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! Please fill in as much as you can — the logs are the most useful part.
+        **Security problem?** Do not use this form, see the [security policy](https://github.com/MoshiDuck/android-tether-mac/security/policy).
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: input
+    id: phone
+    attributes:
+      label: Phone model and Android version
+      placeholder: "Samsung Galaxy S24 Ultra (SM-S928B), Android 16"
+    validations:
+      required: true
+  - type: input
+    id: usbid
+    attributes:
+      label: USB id in tethering mode
+      description: "Run: ioreg -p IOUSB -l -w0 | grep -E 'idVendor|idProduct'  (values are decimal; `1256` = 0x04e8)"
+      placeholder: "04e8:6864"
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version and chip
+      placeholder: "macOS 26.5, Apple Silicon"
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How did you install it?
+      options:
+        - Homebrew (brew install MoshiDuck/tap/android-tether-mac)
+        - From source (make / install.sh)
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: "Output of `sudo ./rndis-tether -v -r -a` or the end of `/var/log/rndis-tether.log`."
+      render: shell
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce

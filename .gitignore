@@ -1,3 +1,5 @@
 rndis-tether
+tests/test_main
+tests/test_main.dSYM/
 menubar/build/
 .DS_Store

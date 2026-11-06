@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: How it works / FAQ
+    url: https://github.com/MoshiDuck/android-tether-mac/blob/main/docs/how-it-works.md
+    about: Read the internals write-up before filing an issue
+  - name: Report a security vulnerability
+    url: https://github.com/MoshiDuck/android-tether-mac/security/policy
+    about: Please do not report security problems in public issues

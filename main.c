@@ -152,6 +152,16 @@ static int rndis_cmd(uint8_t *msg, size_t len, uint32_t expect, uint8_t *resp, s
     return -1;
 }
 
+/* Extrait l'adresse MAC d'une réponse QUERY_CMPLT de r octets. Les champs viennent
+ * du téléphone : tout est vérifié en 64 bits pour qu'aucune valeur ne déborde. */
+static int rndis_parse_mac(const uint8_t *resp, int r, uint8_t mac[6]) {
+    if (r < 28) return -1;
+    uint64_t blen = get32(resp + 16), boff = get32(resp + 20);
+    if (blen < 6 || 8 + boff + 6 > (uint64_t)r) return -1;
+    memcpy(mac, resp + 8 + boff, 6);
+    return 0;
+}
+
 static int rndis_init(void) {
     uint8_t m[24], resp[4096];
     put32(m, RNDIS_INIT_MSG); put32(m + 4, 24); put32(m + 8, req_counter++);
@@ -168,9 +178,7 @@ static int rndis_init(void) {
     put32(q + 12, OID_802_3_PERM_ADDR); put32(q + 16, 0); put32(q + 20, 20);
     r = rndis_cmd(q, sizeof q, RNDIS_QUERY_MSG | RNDIS_CMPLT, resp, sizeof resp);
     if (r < 28 || get32(resp + 12) != 0) { LOG("RNDIS: lecture MAC impossible"); return -1; }
-    uint32_t blen = get32(resp + 16), boff = get32(resp + 20);
-    if (blen < 6 || 8 + boff + 6 > (uint32_t)r) { LOG("RNDIS: réponse MAC invalide"); return -1; }
-    memcpy(my_mac, resp + 8 + boff, 6);
+    if (rndis_parse_mac(resp, r, my_mac) < 0) { LOG("RNDIS: réponse MAC invalide"); return -1; }
 
     uint8_t s[32];
     memset(s, 0, sizeof s);
@@ -210,11 +218,12 @@ static void rx_parse(const uint8_t *buf, int n, frame_cb cb, void *arg) {
     int off = 0;
     while (off + RNDIS_HDR <= n) {
         uint32_t type = get32(buf + off), mlen = get32(buf + off + 4);
-        if (mlen < RNDIS_HDR || off + (int)mlen > n) break;
+        if (mlen < RNDIS_HDR || mlen > (uint32_t)(n - off)) break; /* n - off >= RNDIS_HDR ici */
         if (type == RNDIS_PACKET_MSG) {
-            uint32_t doff = get32(buf + off + 8), dlen = get32(buf + off + 12);
-            uint32_t start = off + 8 + doff;
-            if (start + dlen <= (uint32_t)off + mlen) cb(buf + start, dlen, arg);
+            /* champs fournis par l'appareil : calcul en 64 bits pour éviter tout débordement */
+            uint64_t doff = get32(buf + off + 8), dlen = get32(buf + off + 12);
+            uint64_t start = (uint64_t)off + 8 + doff;
+            if (start + dlen <= (uint64_t)off + mlen) cb(buf + start, (int)dlen, arg);
         }
         off += mlen;
     }

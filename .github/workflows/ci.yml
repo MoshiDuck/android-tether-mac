@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: brew install libusb pkgconf shellcheck
+
+      - name: Build driver (warnings are errors)
+        run: make CFLAGS="-O2 -Wall -Wextra -Werror"
+
+      - name: Unit and fuzz tests (ASan + UBSan)
+        run: make test
+
+      - name: Build menu bar app
+        run: menubar/build.sh
+
+      - name: Lint shell scripts
+        run: shellcheck install.sh uninstall.sh menubar/build.sh scripts/release.sh

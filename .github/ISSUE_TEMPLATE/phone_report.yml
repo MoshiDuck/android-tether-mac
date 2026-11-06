@@ -1,0 +1,45 @@
+name: Phone report
+description: Tell us whether your phone works (grows the compatibility table)
+title: "[Phone] "
+labels: ["phone-report"]
+body:
+  - type: markdown
+    attributes:
+      value: Working *and* non-working reports are both valuable. Thank you!
+  - type: input
+    id: phone
+    attributes:
+      label: Phone model
+      placeholder: "Google Pixel 8 (husky)"
+    validations:
+      required: true
+  - type: input
+    id: android
+    attributes:
+      label: Android version / UI
+      placeholder: "Android 15"
+    validations:
+      required: true
+  - type: input
+    id: usbid
+    attributes:
+      label: USB id with tethering on
+      description: "Run: ioreg -p IOUSB -l -w0 | grep -E 'idVendor|idProduct'  (decimal values; convert to hex)"
+      placeholder: "18d1:4ee3"
+  - type: dropdown
+    id: result
+    attributes:
+      label: Result
+      options:
+        - Works
+        - Works with problems
+        - Does not work
+        - Phone uses CDC-NCM/ECM (macOS handles it natively)
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes and logs
+      description: "For problems, paste the output of `sudo ./rndis-tether -v -r -a`."
+      render: shell

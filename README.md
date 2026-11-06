@@ -1,5 +1,10 @@
 # TetherMac
 
+[![CI](https://github.com/MoshiDuck/android-tether-mac/actions/workflows/ci.yml/badge.svg)](https://github.com/MoshiDuck/android-tether-mac/actions/workflows/ci.yml)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+[![Latest tag](https://img.shields.io/github/v/tag/MoshiDuck/android-tether-mac)](https://github.com/MoshiDuck/android-tether-mac/tags)
+![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Apple%20Silicon%20%2B%20Intel-lightgrey)
+
 **USB tethering for Android phones on macOS — no kernel extension, works on Apple Silicon.**
 
 macOS has no built-in RNDIS driver, and kext-based drivers such as HoRNDIS no longer load on modern macOS. TetherMac (`rndis-tether`) is a small userspace driver: it speaks RNDIS to the phone over libusb, handles ARP and DHCP itself, and exposes the link as a `utun` interface. A menu bar icon lets you switch it on and off.
@@ -89,9 +94,19 @@ This has only been tested on a **Samsung Galaxy S24 Ultra**. Other phones should
 - DHCP lease renewal (every half lease, ~30 min) has not been observed over a full lease yet
 - If the service is killed with `kill -9`, the routes `0.0.0.0/1` and `128.0.0.0/1` may remain: `sudo route -n delete -net 0.0.0.0/1` and `128.0.0.0/1`
 
+## Development
+
+```sh
+make CFLAGS="-O2 -Wall -Wextra -Werror"   # build the driver, warnings are errors
+make test                                  # unit + fuzz tests under ASan/UBSan, no phone or root needed
+menubar/build.sh                           # build the menu bar app
+```
+
+The service runs as root and parses data coming from a USB device, so the parsers are fuzzed in the test suite (see [SECURITY.md](SECURITY.md)). CI runs all of the above on every push.
+
 ## Contributing
 
-Pull requests are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Bug reports with `-v` logs and your phone's `vid:pid` are especially useful.
+Pull requests are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) and the [Code of Conduct](CODE_OF_CONDUCT.md). Phone reports and bug reports with `-v` logs and your phone's `vid:pid` are especially useful. Changes are listed in [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 
