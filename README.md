@@ -66,6 +66,8 @@ Log file when installed as a service: `/var/log/rndis-tether.log`.
 
 ## How it works
 
+*Full write-up: [docs/how-it-works.md](docs/how-it-works.md)*
+
 1. Finds an RNDIS interface (class `E0/01/03`, `EF/04/01` or `02/02/FF`) with its bulk data interface.
 2. RNDIS handshake (`INITIALIZE`, MAC query, packet filter), keepalive replies on the interrupt endpoint.
 3. DHCP client over raw Ethernet frames, then ARP responder.

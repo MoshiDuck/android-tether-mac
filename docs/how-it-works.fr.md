@@ -1,0 +1,135 @@
+# Comment fonctionne TetherMac
+
+*English: [how-it-works.md](how-it-works.md)*
+
+TetherMac donne accès à Internet à un Mac via le partage de connexion USB d'un téléphone Android, **sans aucune extension noyau**. Cette page explique le problème, la méthode et chaque pièce, pour pouvoir auditer, déboguer ou étendre le projet.
+
+Sources : [`main.c`](../main.c) (le driver, ~700 lignes de C) et [`menubar/RNDISTether.swift`](../menubar/RNDISTether.swift) (l'icône de barre de menus).
+
+## 1. Le problème
+
+Quand tu actives le partage de connexion USB, un téléphone Android se présente comme une carte réseau USB utilisant le protocole **RNDIS** (Remote NDIS, un protocole Microsoft qui transporte des trames Ethernet sur USB).
+
+- macOS n'a **aucun pilote RNDIS intégré**. (Il gère CDC-ECM/NCM, que certains téléphones utilisent à la place, ainsi que le partage de connexion de l'iPhone.)
+- La solution classique, [HoRNDIS](https://github.com/jwise/HoRNDIS), est un **kext** : du code chargé dans le noyau. Apple les supprime progressivement. Sur Apple Silicon ils sont bloqués par défaut ; en charger un demande de baisser le niveau de sécurité au démarrage et de l'approuver à la main, et chaque version de macOS rend cela plus difficile.
+- Le remplaçant officiel, **DriverKit**, demande pour les pilotes réseau une autorisation spéciale d'Apple qu'un projet open source amateur ne peut pas raisonnablement obtenir.
+
+## 2. La méthode
+
+Au lieu d'un pilote *dans* le noyau, TetherMac est un programme ordinaire qui fait le travail *en dehors*, en deux moitiés :
+
+```
+┌────────────┐   USB (libusb)    ┌─────────────────────┐   utun    ┌──────────────┐
+│  Android   │ ◄───────────────► │  rndis-tether       │ ◄───────► │ pile réseau  │
+│  (RNDIS)   │ trames Ethernet   │  (espace utilisat.) │ paquets IP│    macOS     │
+└────────────┘ dans paquets RNDIS│  ARP · DHCP · liens │           └──────────────┘
+                                 └─────────────────────┘
+```
+
+1. **Côté USB** : [libusb](https://libusb.info) ouvre le téléphone par l'API USB normale de macOS en espace utilisateur (IOKit). Ça marche parce que macOS ne réclame pas l'interface RNDIS du téléphone : personne d'autre ne l'utilise.
+2. **Côté réseau** : une interface **`utun`**, du même type que celles des VPN, est fournie par le noyau et alimentée depuis l'espace utilisateur.
+
+Aucun code n'est chargé dans le noyau et aucune autorisation Apple n'est nécessaire. Seuls les droits root sont requis, pour créer l'interface `utun` et modifier les routes.
+
+## 3. Côté USB : parler RNDIS
+
+### Trouver le téléphone
+
+Le driver parcourt les appareils USB à la recherche d'une interface de contrôle RNDIS :
+
+| Classe / sous-classe / protocole | Vu sur |
+|----------------------------------|--------|
+| `0xE0 / 0x01 / 0x03` (contrôleur sans fil, RNDIS) | La plupart des Android (Samsung Galaxy S24 Ultra : `04e8:6864`) |
+| `0xEF / 0x04 / 0x01` (divers, RNDIS) | Certains appareils |
+| `0x02 / 0x02 / 0xFF` (CDC ACM, protocole propriétaire) | Anciens appareils |
+
+Il cherche ensuite l'**interface de données** correspondante (classe `0x0A`) avec ses deux points d'accès « bulk » (entrée/sortie), plus le point d'interruption de l'interface de contrôle. S'il ne trouve que du CDC-ECM/NCM, il indique que macOS le gère nativement.
+
+Un téléphone en mode normal (MTP) a un autre identifiant USB (`04e8:6860` sur le S24 Ultra) et aucune interface RNDIS : c'est pourquoi le partage de connexion USB doit d'abord être activé.
+
+### La négociation RNDIS
+
+Les messages de contrôle passent par le point de contrôle (`SEND_ENCAPSULATED_COMMAND` / `GET_ENCAPSULATED_RESPONSE`). Les entiers sont en little-endian.
+
+| Étape | Message | Rôle |
+|-------|---------|------|
+| 1 | `INITIALIZE` (0x02) | Négocier la version et la taille maximale de transfert |
+| 2 | `QUERY` (0x04) pour `OID_802_3_PERMANENT_ADDRESS` | Le téléphone indique l'adresse MAC à utiliser côté Mac |
+| 3 | `SET` (0x05) pour `OID_GEN_CURRENT_PACKET_FILTER` = `0x0D` | Recevoir les trames dirigées, broadcast et multicast |
+| … | `KEEPALIVE` (0x08) | Le téléphone envoie des pings ; on répond sur le canal de contrôle, sinon il nous lâche |
+| fin | `HALT` (0x03) | Arrêt propre |
+
+### Faire passer les paquets
+
+Chaque trame Ethernet est enveloppée dans un message RNDIS `PACKET` : un en-tête de 44 octets (type `0x01`, longueur totale, décalage et longueur des données, …) suivi de la trame. Deux détails importants :
+
+- Une lecture « bulk » peut contenir **plusieurs** paquets RNDIS à la suite ; le driver les analyse en boucle.
+- Quand la longueur d'une écriture « bulk » est un multiple exact de la taille maximale de paquet du point d'accès, un **paquet de longueur nulle** doit suivre, sinon le téléphone attend la suite.
+
+## 4. Côté réseau : d'Ethernet à IP et retour
+
+Une interface `utun` ne transporte que des **paquets IP**, chacun précédé de 4 octets indiquant la famille d'adresses (IPv4 ou IPv6). Le téléphone parle **Ethernet**. Le driver traduit :
+
+- **Téléphone → Mac** : retirer l'en-tête Ethernet de 14 octets (et le remplissage éventuel, grâce au champ longueur d'IP), ajouter l'en-tête de famille de 4 octets, écrire dans `utun`.
+- **Mac → téléphone** : lire un paquet IPv4 depuis `utun`, retirer l'en-tête de famille, ajouter un en-tête Ethernet (destination : la MAC du téléphone, source : la nôtre), envelopper en RNDIS, envoyer par USB.
+- **IPv6 est ignoré** (non implémenté) ; les applications se rabattent sur IPv4.
+
+Comme il n'y a pas de vraie carte réseau, le driver joue aussi les rôles de sa pile réseau :
+
+- **Client DHCP** : envoie `DISCOVER`, prend l'`OFFER`, envoie `REQUEST`, reçoit l'`ACK`, en trames Ethernet/IP/UDP brutes avec le drapeau broadcast, puisqu'on n'a pas encore d'adresse. Il lit adresse, masque, routeur, DNS et durée du bail. Le bail est renouvelé à la moitié de sa durée par un nouveau `REQUEST`.
+- **ARP** : répond à « qui a notre IP ? » venant du téléphone, et apprend la MAC du téléphone à partir de l'ARP et du trafic IP.
+
+## 5. Intégration à macOS
+
+Après le DHCP, le driver lance `ifconfig` pour fixer l'adresse de l'interface `utun` (point à point vers la passerelle du téléphone, MTU 1500).
+
+### Routes (`-r`)
+
+Au lieu de remplacer la route par défaut, il ajoute deux routes **plus précises**, `0.0.0.0/1` et `128.0.0.0/1`, via le téléphone. Ensemble elles couvrent tout IPv4 et priment sur la route par défaut, mais celle-ci reste intacte. Retirer ces deux routes remet tout comme avant.
+
+### DNS
+
+Le DNS a été la partie délicate. Une première version déclarait un résolveur *supplémentaire* dans SystemConfiguration : ça marchait tant que le Wi-Fi était allumé, mais Wi-Fi coupé, macOS n'avait plus de résolveur *par défaut* et les noms ne se résolvaient plus.
+
+La solution est de décrire le tethering comme un **service réseau**, comme le font les clients VPN, en écrivant avec `scutil` les entrées `State:/Network/Service/rndis-tether/IPv4` (adresse, routeur, interface) et `.../DNS` (le serveur DNS du téléphone). macOS l'élit alors service principal quand plus rien d'autre n'a de route, et utilise son DNS. Les deux entrées sont retirées à la sortie.
+
+## 6. Fonctionnement en service
+
+`install.sh` met en place deux tâches launchd :
+
+- **LaunchDaemon** (root, démarre au boot) : lance `rndis-tether -r -w -a -U <ton utilisateur>`.
+  - `-w` : attendre un téléphone et se reconnecter après un débranchement.
+  - `-a` : si aucun appareil RNDIS n'est trouvé, basculer le téléphone en partage de connexion avec `adb shell svc usb setFunctions rndis`, exécuté **en tant que ton utilisateur** (donc avec tes clés ADB et ton PATH, pas ceux de root). `adb` signale souvent une erreur parce que le bus USB se ré-énumère pendant la bascule ; c'est ignoré.
+- **LaunchAgent** (ta session) : l'app de barre de menus.
+
+**Sessions mortes.** Si le téléphone disparaît ou se ré-énumère, les appels USB renvoient une erreur d'E/S ou « pas d'appareil », ou simplement un timeout. Le driver considère une erreur d'appareil, ou cinq timeouts d'envoi de suite, comme une session morte : il retire routes et DNS, libère l'interface et retourne en attente.
+
+**Barre de menus ↔ service.** L'app n'est pas root, elle ne parle donc pas directement au service. Ils partagent deux fichiers dans `/Users/Shared` :
+
+| Fichier | Écrit par | Signification |
+|---------|-----------|---------------|
+| `rndis-tether.disabled` | l'app de menu | S'il existe, le service reste inactif (et démonte toute session active) |
+| `rndis-tether.status` | le service, toutes les ~5 s | `waiting`, `connecting`, `connected <ip> <iface>`, `disabled`, … |
+
+Si le fichier d'état a plus de 20 secondes, l'icône affiche « service arrêté ».
+
+## 7. Compromis et limites
+
+- **Débit** : les paquets traversent la frontière noyau/espace utilisateur et sont copiés ; un pilote natif serait un peu plus rapide. Sur un Galaxy S24 Ultra, environ 42 Mbit/s ont été mesurés, probablement limités par le réseau mobile plutôt que par le driver.
+- **Service permanent** : si le processus s'arrête, le réseau disparaît (il redémarre automatiquement sous launchd).
+- **IPv4 uniquement**.
+- **Testé sur un seul téléphone** (Galaxy S24 Ultra, Android 16, One UI 8). Des téléphones aux particularités RNDIS différentes peuvent demander des adaptations.
+- **Tout le trafic passe par le téléphone** pendant la connexion avec `-r`, même si le Wi-Fi est allumé : ça consomme des données mobiles.
+- **Sécurité** : le service tourne en root. Il ne traite que les données de l'appareil USB branché et du tethering, et ne passe des valeurs lues depuis le téléphone à des commandes externes qu'après les avoir mises sous forme d'adresses IP numériques.
+
+## 8. Où regarder dans le code
+
+| Sujet | Fonction(s) de `main.c` |
+|-------|-------------------------|
+| Détection de l'appareil | `find_device`, `is_rndis_ctrl` |
+| Négociation RNDIS | `rndis_cmd`, `rndis_init`, `rndis_halt`, `answer_keepalive` |
+| Flux de données USB | `send_frame`, `rx_parse`, `rx_thread`, `tx_thread`, `ctrl_thread` |
+| Ethernet ↔ IP | `rx_frame`, `tx_thread` |
+| DHCP / ARP | `build_dhcp`, `dhcp_parse`, `dhcp_acquire`, `handle_arp` |
+| `utun`, routes, DNS | `utun_open`, `configure_iface`, `dns_apply`, `unconfigure_iface` |
+| Contrôle du service | `is_disabled`, `set_status`, `status_tick`, `adb_enable`, `session`, `main` |

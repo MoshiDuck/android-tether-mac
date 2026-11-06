@@ -46,6 +46,10 @@ sudo ./rndis-tether -v -r -w -a
 
 Journal du service : `/var/log/rndis-tether.log`.
 
+## Comment ça marche
+
+Explication détaillée (USB, RNDIS, utun, DHCP, DNS, service) : [docs/how-it-works.fr.md](docs/how-it-works.fr.md)
+
 ## Limites
 
 - IPv4 uniquement
