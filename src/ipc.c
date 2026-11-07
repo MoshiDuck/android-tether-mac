@@ -33,7 +33,9 @@ int ipc_send(int sock, const struct ipc_msg *m, int fd_to_pass) {
 }
 
 int ipc_recv(int sock, struct ipc_msg *m, int *fd_out, int timeout_ms) {
-    *fd_out = -1;
+    int local_fd = -1;
+    int *fo = fd_out ? fd_out : &local_fd;          /* fd_out peut être NULL : un descripteur reçu est alors fermé */
+    *fo = -1;
     uint8_t *dst = (uint8_t *)m;
     size_t got = 0;
     while (got < sizeof *m) {
@@ -60,14 +62,15 @@ int ipc_recv(int sock, struct ipc_msg *m, int *fd_out, int timeout_ms) {
             for (int k = 0; k < nfds; k++) {
                 int fd;
                 memcpy(&fd, CMSG_DATA(c) + k * sizeof(int), sizeof fd);
-                if (*fd_out < 0) *fd_out = fd; else close(fd);   /* un seul descripteur accepté */
+                if (*fo < 0) *fo = fd; else close(fd);   /* un seul descripteur accepté */
             }
         }
         got += (size_t)n;
     }
     if (m->len > IPC_DATA_MAX) goto fail;
+    if (!fd_out && *fo >= 0) close(*fo);
     return 1;
 fail:
-    if (*fd_out >= 0) { close(*fd_out); *fd_out = -1; }
+    if (*fo >= 0) { close(*fo); *fo = -1; }
     return -1;
 }

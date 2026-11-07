@@ -31,7 +31,7 @@ struct ipc_msg {
 /* Envoie un message ; fd_to_pass >= 0 joint ce descripteur. 0 si ok, -1 sinon. */
 int ipc_send(int sock, const struct ipc_msg *m, int fd_to_pass);
 
-/* Reçoit un message complet. Retourne 1 (message reçu ; *fd_out = descripteur reçu ou -1),
+/* Reçoit un message complet. Retourne 1 (message reçu ; *fd_out = descripteur reçu ou -1 ; fd_out peut être NULL),
  * 0 (délai écoulé, timeout_ms < 0 = attente illimitée), -1 (pair fermé, message invalide ou erreur). */
 int ipc_recv(int sock, struct ipc_msg *m, int *fd_out, int timeout_ms);
 

@@ -40,8 +40,8 @@ Released as 0.3.0. Validated on the Galaxy S24 Ultra: `DHCPRELEASE` at the end o
 
 ## 0.4.0 — Confinement and observability
 
-- ⬜ **Privilege-drop hardening** — also set resource limits (`RLIMIT_NPROC`, `RLIMIT_FSIZE`) and verify, at startup, that the worker really lost root in a self-test.
-- ⬜ **Worker watchdog** — also replace a worker that stops answering (it needs a heartbeat, since a connected worker is legitimately quiet).
+- 🟡 **Privilege-drop hardening** — ✅ done: no core files for either process, the worker is limited to 128 file descriptors, and the worker already verifies that it cannot get root back (`setuid(0)` must fail). Not done on purpose: `RLIMIT_FSIZE` (the worker writes to the log through an inherited descriptor, so a zero limit would kill it) and `RLIMIT_NPROC` (counted per user, shared with every other process of `nobody`, so it cannot be set reliably); the sandbox profile below is the right tool for both.
+- ✅ **Worker watchdog** — the worker sends a sign of life every 10 s, and only if its three threads (receive, send, control) have run since the last one; the supervisor kills a worker that is silent for 60 s, cleans up the network configuration and starts a new one. Tested with a silent and a chatty fake worker.
 - ⬜ **Log hygiene** — `/var/log/rndis-tether.log` permissions and rotation (`newsyslog`); no addresses of other devices in logs.
 - ⬜ **macOS sandbox profile for the worker** (Seatbelt, deny by default; allow only the USB IOKit classes, the IPC socket and read access to the flag file). The goal is that even a compromised worker cannot open files or sockets.
 - ✅ **`rndis-tether --diagnose`** — a single command, with no `sudo`, that prints a shareable report: service state (supervisor and worker), USB interfaces, ADB state, routes, DNS, the end of the log, and a plain-language diagnosis. MAC addresses, public IPs and serial numbers are masked. Still to add: the RNDIS handshake and DHCP exchange of the last session.

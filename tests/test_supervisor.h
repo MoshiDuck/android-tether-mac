@@ -338,6 +338,125 @@ static void test_sup_deconfig6(void) {
     sup_reset();
 }
 
+/* ---------- limites du worker et chien de garde ---------- */
+static int child_exit(pid_t p) {
+    int st = 0;
+    waitpid(p, &st, 0);
+    return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+}
+
+static void test_worker_limits(void) {
+    pid_t p = fork();                                    /* dans un processus à part : on abaisse de vraies limites */
+    if (p == 0) {
+        struct rlimit rl;
+        if (worker_limits() < 0) _exit(1);
+        if (getrlimit(RLIMIT_CORE, &rl) || rl.rlim_cur != 0 || rl.rlim_max != 0) _exit(2);
+        if (getrlimit(RLIMIT_NOFILE, &rl) || rl.rlim_cur != WORKER_MAX_FDS || rl.rlim_max != WORKER_MAX_FDS) _exit(3);
+        _exit(0);
+    }
+    CHECK(child_exit(p) == 0);
+
+    p = fork();                                          /* le superviseur : pas de core, mais autant de fichiers qu'avant */
+    if (p == 0) {
+        struct rlimit before, rl;
+        getrlimit(RLIMIT_NOFILE, &before);
+        if (disable_core_dumps() < 0) _exit(1);
+        if (getrlimit(RLIMIT_CORE, &rl) || rl.rlim_cur != 0 || rl.rlim_max != 0) _exit(2);
+        if (getrlimit(RLIMIT_NOFILE, &rl) || rl.rlim_cur != before.rlim_cur) _exit(3);
+        _exit(0);
+    }
+    CHECK(child_exit(p) == 0);
+}
+
+static void test_watchdog_pure(void) {
+    CHECK(!watchdog_expired(100, 100, 60) && !watchdog_expired(160, 100, 60));      /* pile à la limite : pas encore */
+    CHECK(watchdog_expired(161, 100, 60));
+    CHECK(!watchdog_expired(100000, 100, 0));                                       /* 0 : désactivé */
+    CHECK(!watchdog_expired(50, 100, 60));                                          /* horloge qui recule : jamais */
+
+    threads_running = 0;                                                            /* hors session : toujours vivant */
+    thread_alive = 0;
+    CHECK(worker_threads_alive());
+    threads_running = 1;
+    thread_alive = 0;
+    CHECK(!worker_threads_alive());                                                 /* aucun thread n'a progressé */
+    thread_beat(1); thread_beat(2);
+    CHECK(!worker_threads_alive());                                                 /* il en manque un (contrôle) */
+    thread_beat(1); thread_beat(2); thread_beat(4);
+    CHECK(worker_threads_alive());
+    CHECK(!worker_threads_alive());                                                 /* le compteur repart de zéro */
+    thread_beat(1); thread_beat(2); thread_beat(4); thread_beat(8);                 /* bit inconnu : sans effet sur le résultat */
+    CHECK(worker_threads_alive());
+    threads_running = 0;
+    thread_alive = 0;
+}
+
+static int fake_silent_worker(int sock) { (void)sock; sleep(30); return 0; }          /* bloqué : ne dit plus rien */
+
+static int fake_chatty_worker(int sock) {                                             /* vivant : signe de vie toutes les 500 ms */
+    for (int k = 0; k < 6; k++) {
+        struct ipc_msg m, r;
+        memset(&m, 0, sizeof m);
+        m.type = IPC_REQ_STATUS; m.len = 7; memcpy(m.data, "waiting", 7);
+        if (ipc_send(sock, &m, -1) < 0 || ipc_recv(sock, &r, NULL, 2000) != 1) return 9;
+        usleep(500000);
+    }
+    return 0;
+}
+
+static void test_watchdog_functional(void) {
+    sup_reset();
+    watchdog_s = 1;
+
+    test_worker_entry = fake_silent_worker;                                         /* un worker muet est tué */
+    time_t t0 = time(NULL);
+    int rc = run_worker_once(0, 0, 65534, 65534);
+    time_t dt = time(NULL) - t0;
+    CHECK(rc == 1);
+    CHECK(dt >= 1 && dt <= 8);                                                      /* tué après ~2 s, pas après 30 s */
+
+    test_worker_entry = fake_chatty_worker;                                         /* un worker qui parle n'est pas tué */
+    t0 = time(NULL);
+    rc = run_worker_once(0, 0, 65534, 65534);
+    dt = time(NULL) - t0;
+    CHECK(rc == 0);
+    CHECK(dt >= 2 && dt <= 10);                                                     /* a duré plus que la limite (1 s) */
+
+    test_worker_entry = NULL;
+    watchdog_s = 60;
+    sup_reset();
+}
+
+/* Signe de vie du worker : un message STATUS identique au précédent, au plus toutes les 10 s. */
+static void test_worker_heartbeat(void) {
+    int sv[2];
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    int saved_sock = ipc_sock;
+    ipc_sock = sv[0];
+    worker_mode = 1;
+    snprintf(status_text, sizeof status_text, "waiting");
+    threads_running = 0;
+
+    struct ipc_msg reply, got;
+    memset(&reply, 0, sizeof reply);
+    reply.type = IPC_REPLY;
+    CHECK(ipc_send(sv[1], &reply, -1) == 0);                                        /* réponse du superviseur, d'avance */
+    status_tick("waiting");                                                         /* même texte : signe de vie */
+    CHECK(ipc_recv(sv[1], &got, NULL, 100) == 1 && got.type == IPC_REQ_STATUS && got.len == 7 && !memcmp(got.data, "waiting", 7));
+    status_tick("waiting");                                                         /* trop tôt : rien */
+    CHECK(ipc_recv(sv[1], &got, NULL, 100) == 0);
+
+    snprintf(status_text, sizeof status_text, "starting");                          /* état invalide : jamais envoyé */
+    status_tick("starting");
+    CHECK(ipc_recv(sv[1], &got, NULL, 100) == 0);
+
+    worker_mode = 0;
+    ipc_sock = saved_sock;
+    close(sv[0]);
+    close(sv[1]);
+    snprintf(status_text, sizeof status_text, "starting");
+}
+
 static void test_sup_status(void) {
     sup_reset();
     struct ipc_msg rp;
@@ -532,6 +651,10 @@ static void run_supervisor_tests(void) {
     test_sup_ipv6_leak_guard();
     test_sup_config6();
     test_sup_deconfig6();
+    test_worker_limits();
+    test_watchdog_pure();
+    test_worker_heartbeat();
+    test_watchdog_functional();
     test_sup_status();
     test_sup_adb();
     test_sup_unknown();

@@ -40,8 +40,8 @@ Publiée en 0.3.0. Validée sur le Galaxy S24 Ultra : `DHCPRELEASE` à la fin d'
 
 ## 0.4.0 — Confinement et observabilité
 
-- ⬜ **Durcissement de l'abandon de privilèges** — limites de ressources (`RLIMIT_NPROC`, `RLIMIT_FSIZE`) et auto-test au démarrage prouvant que le worker a bien perdu root.
-- ⬜ **Chien de garde du worker** — remplacer aussi un worker qui ne répond plus (il faut un signal de vie, car un worker connecté est légitimement silencieux).
+- 🟡 **Durcissement de l'abandon de privilèges** — ✅ fait : pas de fichier core pour les deux processus, le worker est limité à 128 descripteurs de fichiers, et il vérifie déjà qu'il ne peut pas retrouver root (`setuid(0)` doit échouer). Volontairement non fait : `RLIMIT_FSIZE` (le worker écrit dans le journal par un descripteur hérité, une limite nulle le tuerait) et `RLIMIT_NPROC` (compté par utilisateur, partagé avec tous les autres processus de `nobody`, donc impossible à régler de façon fiable) ; le profil de bac à sable ci-dessous est le bon outil pour les deux.
+- ✅ **Chien de garde du worker** — le worker envoie un signe de vie toutes les 10 s, et seulement si ses trois threads (réception, émission, contrôle) ont tourné depuis le précédent ; le superviseur tue un worker silencieux depuis 60 s, nettoie la configuration réseau et en relance un neuf. Testé avec un faux worker muet et un faux worker bavard.
 - ⬜ **Hygiène des journaux** — droits et rotation de `/var/log/rndis-tether.log` (`newsyslog`) ; pas d'adresses d'autres appareils dans les logs.
 - ⬜ **Profil de bac à sable macOS pour le worker** (Seatbelt, tout refusé par défaut ; seulement les classes IOKit USB, le socket IPC et la lecture du fichier d'état). Même un worker compromis ne pourrait plus ouvrir de fichiers ni de sockets.
 - ✅ **`rndis-tether --diagnose`** — une commande, sans `sudo`, qui produit un rapport partageable : état du service (superviseur et worker), interfaces USB, état d'ADB, routes, DNS, fin du journal et diagnostic en langage clair. Adresses MAC, IP publiques et numéros de série masqués. Reste à ajouter : la négociation RNDIS et l'échange DHCP de la dernière session.

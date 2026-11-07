@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 /* Tests du canal worker <-> superviseur : messages, passage de descripteur, pair fermé, données hostiles. */
+#include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <stdlib.h>
@@ -85,6 +86,30 @@ static void test_peer_closed(void) {
     close(sv[1]);
 }
 
+/* fd_out peut être NULL : le message arrive, et un descripteur joint est fermé au lieu de fuir. */
+static void test_null_fd_out(void) {
+    int sv[2], pp[2];
+    struct ipc_msg in, out = mk(IPC_REQ_ADB, NULL, 0);
+    pair(sv);
+    CHECK(ipc_send(sv[0], &out, -1) == 0);
+    CHECK(ipc_recv(sv[1], &in, NULL, 1000) == 1 && in.type == IPC_REQ_ADB);
+    CHECK(ipc_recv(sv[1], &in, NULL, 50) == 0);                       /* délai sans message */
+
+    CHECK(pipe(pp) == 0);
+    CHECK(ipc_send(sv[0], &out, pp[0]) == 0);                         /* avec un descripteur joint */
+    close(pp[0]);                                                     /* il ne reste que la copie du récepteur */
+    CHECK(ipc_recv(sv[1], &in, NULL, 1000) == 1);                     /* ...que ipc_recv doit fermer */
+    signal(SIGPIPE, SIG_IGN);
+    CHECK(write(pp[1], "x", 1) == -1 && errno == EPIPE);              /* plus aucun lecteur : pas de fuite */
+    close(pp[1]);
+
+    CHECK(ipc_send(sv[0], &out, -1) == 0);
+    close(sv[0]);
+    CHECK(ipc_recv(sv[1], &in, NULL, 1000) == 1);
+    CHECK(ipc_recv(sv[1], &in, NULL, 1000) == -1);                    /* pair fermé */
+    close(sv[1]);
+}
+
 static void test_malformed(void) {
     int sv[2], fd;
     struct ipc_msg in;
@@ -158,6 +183,7 @@ void run_ipc_tests(void) {
     test_roundtrip();
     test_fd_passing();
     test_peer_closed();
+    test_null_fd_out();
     test_malformed();
     test_extra_fds();
     test_fuzz();

@@ -35,6 +35,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/kern_control.h>
@@ -116,6 +117,7 @@ static pthread_mutex_t tx_lock = PTHREAD_MUTEX_INITIALIZER;
 #ifdef RNDIS_TESTING
 /* Compilé avec -DRNDIS_TESTING (tests uniquement) : les commandes système sont enregistrées, pas exécutées. */
 void test_record_command(const char *cmd);
+static int (*test_worker_entry)(int sock);   /* si défini, le worker forké exécute cette fonction au lieu de worker_main */
 #endif
 
 PRINTF_LIKE(1, 2) static void logf_(const char *fmt, ...) {
@@ -204,7 +206,11 @@ static void request_adb(void) { ipc_call(IPC_REQ_ADB, NULL, 0, NULL, NULL, 90000
 static const char *adb_user;
 static char status_text[160] = "starting";
 
+#ifdef RNDIS_TESTING
+static int is_disabled(void) { return 0; }      /* les tests ne dépendent pas du vrai fichier de l'icône de menu */
+#else
 static int is_disabled(void) { return access(FLAG_DISABLED, F_OK) == 0; }
+#endif
 
 static void status_write(void) {
 #ifdef RNDIS_TESTING
@@ -226,13 +232,43 @@ PRINTF_LIKE(1, 2) static void set_status(const char *fmt, ...) {
     status_write();
 }
 
+/* Chien de garde. Le worker lit des données hostiles : un blocage (volontaire ou non) ne doit pas laisser le Mac
+ * sans réseau. Il envoie son état au moins toutes les WORKER_HEARTBEAT_S secondes, mais seulement si ses trois
+ * threads (réception, émission, contrôle) ont tourné depuis le dernier signe de vie ; le superviseur tue un worker
+ * silencieux depuis plus de watchdog_s secondes, nettoie la configuration réseau et en relance un neuf. */
+#define WORKER_HEARTBEAT_S 10
+#define WORKER_THREADS 7                    /* bits : 1 réception, 2 émission, 4 contrôle */
+static int watchdog_s = 60;
+static unsigned thread_alive;               /* bits posés par chaque thread à chaque tour de boucle */
+static int threads_running;                 /* une session est active : les trois threads doivent progresser */
+
+static void thread_beat(unsigned bit) { __atomic_or_fetch(&thread_alive, bit, __ATOMIC_RELAXED); }
+
+/* Vrai si tous les threads ont progressé depuis le dernier appel (puis remet le compteur à zéro). */
+static int worker_threads_alive(void) {
+    if (!__atomic_load_n(&threads_running, __ATOMIC_ACQUIRE)) return 1;
+    return (__atomic_exchange_n(&thread_alive, 0, __ATOMIC_RELAXED) & WORKER_THREADS) == WORKER_THREADS;
+}
+
+/* Vrai si le worker est silencieux depuis trop longtemps. */
+static int watchdog_expired(int64_t now, int64_t last_seen, int limit_s) {
+    return limit_s > 0 && now - last_seen > limit_s;
+}
+
 /* Change l'état s'il diffère, sinon rafraîchit le fichier au plus toutes les 5 s. */
 static void status_tick(const char *text) {
     static time_t last;
     if (worker_mode) {                  /* le worker signale les changements ; le superviseur écrit le fichier */
+        static int64_t last_sent;
+        int64_t now = now_s();
         if (text && strcmp(text, status_text)) {
             snprintf(status_text, sizeof status_text, "%s", text);
             ipc_call(IPC_REQ_STATUS, text, strlen(text), NULL, NULL, 5000);
+            last_sent = now;
+        } else if (now - last_sent >= WORKER_HEARTBEAT_S && policy_check_status(status_text, strlen(status_text)) == POLICY_OK &&
+                   worker_threads_alive()) {
+            ipc_call(IPC_REQ_STATUS, status_text, strlen(status_text), NULL, NULL, 5000);   /* signe de vie pour le chien de garde */
+            last_sent = now;
         }
         return;
     }
@@ -773,6 +809,7 @@ static void *rx_thread(void *a) {
     (void)a;
     uint8_t *buf = malloc(RX_BUF);
     while (running) {
+        thread_beat(1);
         int got = 0;
         int r = libusb_bulk_transfer(h, ep_in, buf, RX_BUF, &got, 500);
         if (r == 0 && got > 0) rx_parse(buf, got, rx_frame, NULL);
@@ -792,6 +829,7 @@ static void *tx_thread(void *a) {
     int fails = 0;
     struct pollfd p = {.fd = utun_fd, .events = POLLIN};
     while (running) {
+        thread_beat(2);
         if (poll(&p, 1, 500) <= 0) continue;
         ssize_t n = read(utun_fd, in, sizeof in);
         if (n <= 4) continue;
@@ -830,6 +868,7 @@ static void *ctrl_thread(void *a) {
     time_t next_rs = time(NULL) + 1;
     int rs_sent = 0;
     while (running) {
+        thread_beat(4);
         if (dhcp_active) {                                    /* T1 / T2 / expiration du bail (RFC 2131) */
             pthread_mutex_lock(&dhcp_lock);
             enum dhcp_action act = dhcp_client_tick(&dhcp_c, now_s(), arc4random() | 1);
@@ -1143,11 +1182,27 @@ static int worker_run(unsigned vid, unsigned pid) {
     return quit ? 0 : rc;
 }
 
+/* Pas de fichier core : il contiendrait le trafic en clair (worker) ou la configuration (superviseur). */
+static int disable_core_dumps(void) {
+    struct rlimit rl = {0, 0};
+    return setrlimit(RLIMIT_CORE, &rl);
+}
+
+#define WORKER_MAX_FDS 128
+/* Le worker n'a besoin que de quelques descripteurs : stdin/out/err, le canal, l'interface utun, libusb.
+ * Plafonner ce nombre limite les dégâts d'un worker détourné (fuite, boucle d'ouverture). */
+static int worker_limits(void) {
+    struct rlimit rl = {WORKER_MAX_FDS, WORKER_MAX_FDS};
+    if (disable_core_dumps() < 0) return -1;
+    return setrlimit(RLIMIT_NOFILE, &rl);
+}
+
 static int worker_main(int sock, unsigned vid, unsigned pid, uid_t uid, gid_t gid) {
     worker_mode = 1;
     ipc_sock = sock;
     for (int fd = 3; fd < 256; fd++)     /* ne garde que stdin/stdout/stderr et le canal du superviseur */
         if (fd != sock) close(fd);
+    if (worker_limits() < 0) VLOG("limites du worker non appliquées (%s)", strerror(errno));
     if (drop_privileges(uid, gid) < 0) {
         LOG("Impossible d'abandonner les privilèges (%s)", strerror(errno));
         return EXIT_FATAL;
@@ -1165,12 +1220,16 @@ static int run_worker_once(unsigned vid, unsigned pid, uid_t uid, gid_t gid) {
     if (child < 0) { perror("fork"); close(sv[0]); close(sv[1]); return EXIT_FATAL; }
     if (child == 0) {
         close(sv[0]);
+#ifdef RNDIS_TESTING
+        if (test_worker_entry) _exit(test_worker_entry(sv[1]));       /* faux worker des tests */
+#endif
         _exit(worker_main(sv[1], vid, pid, uid, gid));
     }
     close(sv[1]);
     utun_fd = -1; cfg4_done = cfg6_done = 0; my_ip = gw_ip = 0;
     v6_routes = v6_svc = v6_blocked = 0;
     struct rate_limit rl = {0, 0};
+    int64_t last_seen = now_s();                                     /* dernier signe de vie du worker */
 
     for (;;) {
         struct ipc_msg m;
@@ -1184,8 +1243,14 @@ static int run_worker_once(unsigned vid, unsigned pid, uid_t uid, gid_t gid) {
                 break;
             }
             handle_request(sv[0], &m);
+            last_seen = now_s();
         } else if (r < 0) {
             break;                                                   /* worker disparu ou message invalide */
+        }
+        if (watchdog_expired(now_s(), last_seen, watchdog_s)) {
+            LOG("Le worker ne donne plus signe de vie depuis plus de %d s : arrêt du worker", watchdog_s);
+            kill(child, SIGKILL);
+            break;
         }
         status_tick(NULL);                                           /* rafraîchit le fichier d'état */
         if (quit || is_disabled()) { kill(child, SIGTERM); break; }
@@ -1213,6 +1278,7 @@ static int supervisor_main(unsigned vid, unsigned pid) {
     }
     uid_t uid = pw->pw_uid;
     gid_t gid = pw->pw_gid;
+    if (disable_core_dumps() < 0) LOG("Impossible de désactiver les fichiers core (%s)", strerror(errno));
     LOG("Superviseur %s démarré ; le worker tournera sans privilèges (utilisateur %s)", RNDIS_VERSION, worker_user);
     if (want_route && !allow_v6_leak) {                              /* routes « reject » restées d'un arrêt brutal précédent */
         sh("/sbin/route -q -n delete -inet6 -net ::/1 ::1");
@@ -1402,9 +1468,11 @@ static int session(void) {
     if (request_config4(&L) < 0) { LOG("Le superviseur a refusé la configuration réseau"); goto out; }
 
     pthread_t t_rx, t_tx, t_ct;
+    __atomic_store_n(&thread_alive, 0, __ATOMIC_RELAXED);
     pthread_create(&t_rx, NULL, rx_thread, NULL);
     pthread_create(&t_tx, NULL, tx_thread, NULL);
     pthread_create(&t_ct, NULL, ctrl_thread, NULL);
+    __atomic_store_n(&threads_running, 1, __ATOMIC_RELEASE);
     LOG("Tethering actif. Ctrl-C pour arrêter.");
     {
         char st[96];
@@ -1418,6 +1486,7 @@ static int session(void) {
     }
     LOG("Arrêt…");
     pthread_join(t_rx, NULL); pthread_join(t_tx, NULL); pthread_join(t_ct, NULL);
+    __atomic_store_n(&threads_running, 0, __ATOMIC_RELEASE);
     release_lease();
     rc = 0;
 out:
