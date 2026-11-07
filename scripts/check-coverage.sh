@@ -15,9 +15,11 @@ for rule in "$@"; do
     name="${rule%%=*}"
     min="${rule#*=}"
     # 10e colonne du rapport : couverture des lignes (ex. 99.20%)
-    cover=$(awk -v n="$name" '$1 == n { gsub("%", "", $10); print $10 }' "$report" | head -n 1)
+    # le nom peut être préfixé d'un dossier selon la version de llvm-cov (dhcp.c ou src/dhcp.c)
+    cover=$(awk -v n="$name" '$1 == n || (length($1) > length(n) && substr($1, length($1) - length(n)) == "/" n) { gsub("%", "", $10); print $10 }' "$report" | head -n 1)
     if [ -z "$cover" ]; then
-        echo "couverture: $name introuvable dans $report" >&2
+        echo "couverture: $name introuvable dans $report ; rapport reçu :" >&2
+        cat "$report" >&2
         status=1
         continue
     fi

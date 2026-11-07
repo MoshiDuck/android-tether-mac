@@ -19,7 +19,7 @@ jobs:
     env:
       TAG: ${{ github.ref_name }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Check that the changelog has this version
         run: |
@@ -68,7 +68,7 @@ jobs:
 
       - name: Check out the tap
         if: steps.tap.outputs.enabled == 'true'
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: MoshiDuck/homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
