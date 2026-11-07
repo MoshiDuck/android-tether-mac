@@ -18,23 +18,23 @@ Legend: ✅ done · 🔶 done in the code, waiting for validation on real hardwa
 
 ---
 
-## 0.2.0 — Safe by construction  *(next release)*
+## 0.2.0 — Safe by construction  *(released 2026-11-06)*
 
 Goal: a bug in the code that reads data from the phone or the network can no longer give root.
 
 - ✅ **Privilege separation** — a tiny root supervisor and an unprivileged worker (`nobody`); fixed-size IPC; every request validated by `policy.c`; one fresh worker per session. *Validated live on the S24 Ultra (2026-11-06):* `nobody` can open the USB device; the two-process service carried IPv4 and IPv6 traffic, survived the menu bar toggle and a real USB drop, and cleaned up routes and DNS each time. The `-W` option remains for systems where that is not the case.
 - ✅ **DHCP per RFC 2131** — unicast renewal at T1, broadcast rebind at T2, retransmission back-off, expiry and NAK handling. *Validated live on the S24 Ultra (2026-11-06):* the unicast renewal at T1 was accepted (`bail renouvelé`). The rebind at T2 and expiry paths are covered by simulated-clock tests only.
+
+Released as 0.2.0. Both items were validated on the Galaxy S24 Ultra; the remaining hardening work moved to 0.3.0.
+
+## 0.3.0 — Hardening, confinement and observability
+
 - ⬜ **`DHCPRELEASE` on shutdown** so the phone's address pool is not left with stale leases.
 - ⬜ **Subnet-overlap guard** — refuse a phone subnet that overlaps a network the Mac already uses (a malicious phone could otherwise shadow a LAN). Needs a clear error message, since a legitimate clash would block tethering.
 - ⬜ **Privilege-drop hardening** — also set resource limits (`RLIMIT_NPROC`, `RLIMIT_FSIZE`) and verify, at startup, that the worker really lost root in a self-test.
 - ⬜ **IPC rate limiting and watchdog** — a worker that floods the supervisor, or stops answering, is killed and replaced.
 - ⬜ **Log hygiene** — `/var/log/rndis-tether.log` permissions and rotation (`newsyslog`); no addresses of other devices in logs.
 - ⬜ **`--version` and a man page.**
-
-Exit criteria: all of the above green in CI; privilege separation and DHCP validated on the S24 Ultra; `CHANGELOG` lists the security model change.
-
-## 0.3.0 — Confinement and observability
-
 - ⬜ **macOS sandbox profile for the worker** (Seatbelt, deny by default; allow only the USB IOKit classes, the IPC socket and read access to the flag file). The goal is that even a compromised worker cannot open files or sockets.
 - ⬜ **`rndis-tether --diagnose`** — a single command that prints a shareable report (USB descriptors, RNDIS handshake result, DHCP exchange, RA received, routes, DNS state), with no secrets. This is what turns a "doesn't work" issue into something fixable.
 - ⬜ **Sleep/wake handling** — detect a Mac wake, re-verify the lease and the USB link, recover cleanly.

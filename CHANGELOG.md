@@ -5,6 +5,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-06
+
+**Security-model release**: the root service is split so that code reading data from the phone or the network no longer runs as root. Upgrade with `brew upgrade android-tether-mac && tethermac-install`.
+
 ### Security
 - **Privilege separation.** The root service is now a small *supervisor* plus an unprivileged *worker* (`nobody`, or `-W user`). The worker does all the USB, RNDIS, DHCP, NDP and packet parsing; it receives the `utun` interface by descriptor passing and can only ask the supervisor for five actions over a fixed-size channel. The supervisor validates every value (`policy.c`) before it runs `ifconfig`, `route`, `scutil` or `adb`, remembers what it applied so cleanup never depends on the worker, and starts a fresh worker for each session. A bug in the parsing code is no longer a root exploit.
 
@@ -47,6 +51,7 @@ First public release.
 - Homebrew tap (`brew install MoshiDuck/tap/android-tether-mac`).
 - Tested on a Samsung Galaxy S24 Ultra (SM-S928B, Android 16, One UI 8).
 
-[Unreleased]: https://github.com/MoshiDuck/android-tether-mac/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/MoshiDuck/android-tether-mac/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/MoshiDuck/android-tether-mac/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/MoshiDuck/android-tether-mac/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/MoshiDuck/android-tether-mac/releases/tag/v0.1.0

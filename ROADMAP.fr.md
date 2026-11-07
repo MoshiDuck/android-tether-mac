@@ -18,23 +18,23 @@ Légende : ✅ fait · 🔶 fait dans le code, en attente de validation sur mat�
 
 ---
 
-## 0.2.0 — Sûr par construction  *(prochaine version)*
+## 0.2.0 — Sûr par construction  *(publiée le 2026-11-06)*
 
 Objectif : un bogue dans le code qui lit des données du téléphone ou du réseau ne peut plus donner root.
 
 - ✅ **Séparation des privilèges** — un petit superviseur root et un worker sans privilèges (`nobody`) ; IPC à messages de taille fixe ; chaque demande validée par `policy.c` ; un worker neuf par session. *Validée en réel sur le S24 Ultra (2026-11-06) :* `nobody` peut ouvrir l'appareil USB ; le service à deux processus a fait passer IPv4 et IPv6, résisté à l'interrupteur de l'icône et à une vraie coupure USB, et nettoyé routes et DNS à chaque fois. L'option `-W` reste disponible pour les systèmes où ce ne serait pas le cas.
 - ✅ **DHCP selon la RFC 2131** — renouvellement en unicast à T1, rebind en broadcast à T2, retransmissions, gestion de l'expiration et du NAK. *Validé en réel sur le S24 Ultra (2026-11-06) :* le renouvellement unicast à T1 a été accepté (`bail renouvelé`). Le rebind à T2 et l'expiration ne sont couverts que par des tests à horloge simulée.
+
+Publiée en 0.2.0. Les deux points ont été validés sur le Galaxy S24 Ultra ; le reste du durcissement passe en 0.3.0.
+
+## 0.3.0 — Durcissement, confinement et observabilité
+
 - ⬜ **`DHCPRELEASE` à l'arrêt**, pour ne pas laisser de baux orphelins dans le pool d'adresses du téléphone.
 - ⬜ **Garde contre le chevauchement de sous-réseau** — refuser un sous-réseau du téléphone qui recouvre un réseau déjà utilisé par le Mac (un téléphone malveillant pourrait sinon masquer un réseau local). Message d'erreur clair, car un conflit légitime bloquerait le tethering.
 - ⬜ **Durcissement de l'abandon de privilèges** — limites de ressources (`RLIMIT_NPROC`, `RLIMIT_FSIZE`) et auto-test au démarrage prouvant que le worker a bien perdu root.
 - ⬜ **Limitation de débit de l'IPC et chien de garde** — un worker qui inonde le superviseur, ou qui ne répond plus, est tué et remplacé.
 - ⬜ **Hygiène des journaux** — droits et rotation de `/var/log/rndis-tether.log` (`newsyslog`) ; pas d'adresses d'autres appareils dans les logs.
 - ⬜ **`--version` et une page de manuel.**
-
-Critères de sortie : tout ce qui précède au vert en CI ; séparation des privilèges et DHCP validés sur le S24 Ultra ; le `CHANGELOG` signale le changement de modèle de sécurité.
-
-## 0.3.0 — Confinement et observabilité
-
 - ⬜ **Profil de bac à sable macOS pour le worker** (Seatbelt, tout refusé par défaut ; seulement les classes IOKit USB, le socket IPC et la lecture du fichier d'état). Même un worker compromis ne pourrait plus ouvrir de fichiers ni de sockets.
 - ⬜ **`rndis-tether --diagnose`** — une commande qui produit un rapport partageable (descripteurs USB, résultat de la négociation RNDIS, échange DHCP, RA reçue, routes, état du DNS), sans secrets. C'est ce qui transforme un « ça ne marche pas » en problème réparable.
 - ⬜ **Gestion veille/réveil** — détecter le réveil du Mac, revérifier le bail et la liaison USB, reprendre proprement.
