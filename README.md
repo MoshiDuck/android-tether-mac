@@ -97,6 +97,10 @@ Log file when installed as a service: `/var/log/rndis-tether.log`.
 5. The menu bar app talks to the root service through two files in `/Users/Shared` (`rndis-tether.disabled`, `rndis-tether.status`).
 6. The service is split in two processes — a root supervisor and an unprivileged worker that does all the parsing — see *Privilege separation* in [docs/how-it-works.md](docs/how-it-works.md).
 
+## Troubleshooting
+
+Run `rndis-tether --diagnose` (no `sudo`): it ends with a plain-language diagnosis and can be pasted into an issue. See [docs/troubleshooting.md](docs/troubleshooting.md) for what each message means.
+
 ## Compatibility
 
 | Phone | Android | USB id (tethering) | Status |

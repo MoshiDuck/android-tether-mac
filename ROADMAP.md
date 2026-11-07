@@ -102,7 +102,7 @@ Criteria, all required:
 3. **Signed and notarised** by Apple (Developer ID), distributed as a notarised installer as well as through Homebrew.
 4. **Integration tests without hardware** with `main.c` ≥ 80 % line coverage, and scheduled fuzzing.
 5. Three months without a known high-severity bug.
-6. Documentation complete: install, troubleshooting (`--diagnose`), architecture, security model.
+6. Documentation complete: install, troubleshooting (`--diagnose`, ✅ `docs/troubleshooting.md`), architecture, security model.
 
 ---
 
