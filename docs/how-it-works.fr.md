@@ -71,13 +71,22 @@ Chaque trame Ethernet est enveloppée dans un message RNDIS `PACKET` : un en-tê
 Une interface `utun` ne transporte que des **paquets IP**, chacun précédé de 4 octets indiquant la famille d'adresses (IPv4 ou IPv6). Le téléphone parle **Ethernet**. Le driver traduit :
 
 - **Téléphone → Mac** : retirer l'en-tête Ethernet de 14 octets (et le remplissage éventuel, grâce au champ longueur d'IP), ajouter l'en-tête de famille de 4 octets, écrire dans `utun`.
-- **Mac → téléphone** : lire un paquet IPv4 depuis `utun`, retirer l'en-tête de famille, ajouter un en-tête Ethernet (destination : la MAC du téléphone, source : la nôtre), envelopper en RNDIS, envoyer par USB.
-- **IPv6 est ignoré** (non implémenté) ; les applications se rabattent sur IPv4.
+- **Mac → téléphone** : lire un paquet IPv4 ou IPv6 depuis `utun`, retirer l'en-tête de famille, ajouter un en-tête Ethernet (destination : la MAC du téléphone, source : la nôtre ; pour l'IPv6 multicast, `33:33:` suivi des quatre derniers octets de l'adresse), envelopper en RNDIS, envoyer par USB.
 
 Comme il n'y a pas de vraie carte réseau, le driver joue aussi les rôles de sa pile réseau :
 
 - **Client DHCP** : envoie `DISCOVER`, prend l'`OFFER`, envoie `REQUEST`, reçoit l'`ACK`, en trames Ethernet/IP/UDP brutes avec le drapeau broadcast, puisqu'on n'a pas encore d'adresse. Il lit adresse, masque, routeur, DNS et durée du bail. Le bail est renouvelé à la moitié de sa durée par un nouveau `REQUEST`.
 - **ARP** : répond à « qui a notre IP ? » venant du téléphone, et apprend la MAC du téléphone à partir de l'ARP et du trafic IP.
+
+### IPv6
+
+Même principe pour IPv6, avec ICMPv6 qui joue le rôle d'ARP et de DHCP :
+
+- **Sollicitation / annonce de routeur** : peu après la connexion, le driver envoie une sollicitation de routeur (`ff02::2`). Le téléphone répond par une annonce portant un préfixe `/64`. Le driver fabrique une adresse avec ce préfixe et un identifiant d'interface aléatoire (SLAAC), et la configure avec `ifconfig inet6`. Seule la première annonce utilisable est retenue par session.
+- **Découverte de voisins** : le téléphone demande « qui a cette adresse ? » par des sollicitations de voisin. Il est le seul autre hôte du lien : le driver répond donc à toute demande valide par une annonce de voisin portant notre adresse MAC, faute de quoi le téléphone ne pourrait pas nous renvoyer de paquets. Les demandes invalides (mauvaise limite de sauts, source non spécifiée, cible multicast…) sont ignorées.
+- **Checksums** : les checksums ICMPv6 couvrent un pseudo-en-tête IPv6 ; `icmp6_csum` les calcule et les tests la recoupent avec une implémentation indépendante.
+- Tout ce qui est lu sur le réseau est vérifié en bornes et fuzzé, comme les autres analyseurs.
+- `-4` désactive tout ceci.
 
 ## 5. Intégration à macOS
 
@@ -85,13 +94,15 @@ Après le DHCP, le driver lance `ifconfig` pour fixer l'adresse de l'interface `
 
 ### Routes (`-r`)
 
-Au lieu de remplacer la route par défaut, il ajoute deux routes **plus précises**, `0.0.0.0/1` et `128.0.0.0/1`, via le téléphone. Ensemble elles couvrent tout IPv4 et priment sur la route par défaut, mais celle-ci reste intacte. Retirer ces deux routes remet tout comme avant.
+Au lieu de remplacer la route par défaut, il ajoute deux routes **plus précises**, `0.0.0.0/1` et `128.0.0.0/1`, via le téléphone. Ensemble elles couvrent tout IPv4 et priment sur la route par défaut, mais celle-ci reste intacte. Retirer ces deux routes remet tout comme avant. Quand une adresse IPv6 a été configurée, la même méthode s'applique avec `::/1` et `8000::/1`, pour que le trafic IPv6 ne contourne pas le tethering par le Wi-Fi.
 
 ### DNS
 
 Le DNS a été la partie délicate. Une première version déclarait un résolveur *supplémentaire* dans SystemConfiguration : ça marchait tant que le Wi-Fi était allumé, mais Wi-Fi coupé, macOS n'avait plus de résolveur *par défaut* et les noms ne se résolvaient plus.
 
 La solution est de décrire le tethering comme un **service réseau**, comme le font les clients VPN, en écrivant avec `scutil` les entrées `State:/Network/Service/rndis-tether/IPv4` (adresse, routeur, interface) et `.../DNS` (le serveur DNS du téléphone). macOS l'élit alors service principal quand plus rien d'autre n'a de route, et utilise son DNS. Les deux entrées sont retirées à la sortie.
+
+Dès qu'une adresse IPv6 existe, une troisième entrée, `.../IPv6` (adresse, longueur de préfixe, adresse link-local du routeur, interface), est ajoutée. Ce n'est pas cosmétique : sans elle, macOS n'envoie que des requêtes `A` au résolveur du tethering, et les noms qui n'existent qu'en IPv6 ne se résolvent pas (`scutil --dns` n'affiche que « Request A records »). Avec elle, le résolveur affiche aussi « Request AAAA records ».
 
 ## 6. Fonctionnement en service
 
@@ -117,7 +128,7 @@ Si le fichier d'état a plus de 20 secondes, l'icône affiche « service arrêt�
 
 - **Débit** : les paquets traversent la frontière noyau/espace utilisateur et sont copiés ; un pilote natif serait un peu plus rapide. Sur un Galaxy S24 Ultra, environ 42 Mbit/s ont été mesurés, probablement limités par le réseau mobile plutôt que par le driver.
 - **Service permanent** : si le processus s'arrête, le réseau disparaît (il redémarre automatiquement sous launchd).
-- **IPv4 uniquement**.
+- **IPv6 dépend du téléphone** : il faut une annonce de routeur avec un préfixe `/64` (validé sur un Galaxy S24 Ultra, dont le réseau mobile fournit l'IPv6). Sans elle, rien n'est configuré en IPv6 et le tethering reste en IPv4 seul. Les serveurs DNS IPv6 annoncés par le routeur (RDNSS) ne sont pas utilisés : les noms sont résolus par le DNS IPv4 du téléphone, qui répond aussi aux requêtes `AAAA`. Aucune différence de vitesse entre IPv4 et IPv6 n'a été mesurable ; le réseau mobile domine.
 - **Testé sur un seul téléphone** (Galaxy S24 Ultra, Android 16, One UI 8). Des téléphones aux particularités RNDIS différentes peuvent demander des adaptations.
 - **Tout le trafic passe par le téléphone** pendant la connexion avec `-r`, même si le Wi-Fi est allumé : ça consomme des données mobiles.
 - **Sécurité** : le service tourne en root. Il ne traite que les données de l'appareil USB branché et du tethering, et ne passe des valeurs lues depuis le téléphone à des commandes externes qu'après les avoir mises sous forme d'adresses IP numériques.
@@ -131,5 +142,6 @@ Si le fichier d'état a plus de 20 secondes, l'icône affiche « service arrêt�
 | Flux de données USB | `send_frame`, `rx_parse`, `rx_thread`, `tx_thread`, `ctrl_thread` |
 | Ethernet ↔ IP | `rx_frame`, `tx_thread` |
 | DHCP / ARP | `build_dhcp`, `dhcp_parse`, `dhcp_acquire`, `handle_arp` |
+| IPv6 (NDP, RA, SLAAC) | `icmp6_csum`, `build_na`, `parse_ra`, `build_rs`, `handle_ipv6`, `configure_ipv6` |
 | `utun`, routes, DNS | `utun_open`, `configure_iface`, `dns_apply`, `unconfigure_iface` |
 | Contrôle du service | `is_disabled`, `set_status`, `status_tick`, `adb_enable`, `session`, `main` |

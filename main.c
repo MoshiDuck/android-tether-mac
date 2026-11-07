@@ -59,6 +59,15 @@ static int mps_out = 512;
 static volatile sig_atomic_t running = 1, quit;
 static int verbose, want_route, wait_mode, dns_applied, auto_adb;
 static uint32_t srv_ip, renew_period; /* DHCP: serveur et période de renouvellement (s) */
+static volatile uint32_t renew_xid;   /* xid de la dernière demande de renouvellement (0 = aucune en attente) */
+
+/* IPv6 : adresse SLAAC construite à partir de la première annonce de routeur (RA) reçue */
+static int ipv6_on = 1;               /* -4 le désactive */
+static uint8_t v6_addr[16], v6_router[16];
+static int v6_svc;                    /* service IPv6 déclaré dans SystemConfiguration (pour que macOS demande les AAAA) */
+static int v6_claimed;               /* une RA exploitable a déjà été prise en compte */
+static int v6_pending;                /* adresse prête, à configurer par le thread de contrôle */
+static int v6_routes;                 /* routes ::/1 et 8000::/1 installées */
 static int utun_fd = -1;
 static char utun_name[IFNAMSIZ];
 static uint8_t my_mac[6], gw_mac[6];
@@ -199,6 +208,7 @@ static void rndis_halt(void) {
 /* ---------- Data path ---------- */
 static int send_frame(const uint8_t *frame, int len) {
     uint8_t buf[RNDIS_HDR + 2048];
+    if (!h) return LIBUSB_ERROR_NO_DEVICE;
     if (len > 2048) return -1;
     memset(buf, 0, RNDIS_HDR);
     put32(buf, RNDIS_PACKET_MSG); put32(buf + 4, RNDIS_HDR + len);
@@ -405,7 +415,134 @@ static void configure_iface(const struct lease *L) {
     }
 }
 
+/* ---------- IPv6 : NDP, annonces de routeur (RA), SLAAC ----------
+ * Le téléphone parle IPv6 sur Ethernet ; utun ne transporte que des paquets IP. Comme pour
+ * IPv4, on joue donc le rôle de la pile réseau : répondre aux sollicitations de voisin (NS)
+ * du téléphone avec notre MAC, solliciter un routeur (RS), lire l'annonce (RA) pour fabriquer
+ * une adresse SLAAC, puis relayer les paquets dans les deux sens. */
+static uint16_t icmp6_csum(const uint8_t *src, const uint8_t *dst, const uint8_t *msg, int len) {
+    uint32_t s = 0;
+    for (int i = 0; i < 16; i += 2) s += src[i] << 8 | src[i + 1];
+    for (int i = 0; i < 16; i += 2) s += dst[i] << 8 | dst[i + 1];
+    s += ((uint32_t)len >> 16) + ((uint32_t)len & 0xffff); /* longueur « couche haute » sur 32 bits */
+    s += 58;                                               /* prochain en-tête : ICMPv6 */
+    for (int i = 0; i + 1 < len; i += 2) s += msg[i] << 8 | msg[i + 1];
+    if (len & 1) s += msg[len - 1] << 8;
+    while (s >> 16) s = (s & 0xffff) + (s >> 16);
+    return ~s;
+}
+
+/* Construit l'annonce de voisin (NA) répondant à la sollicitation (NS) contenue dans la trame f.
+ * Le téléphone est le seul voisin du lien : toute cible qu'il sollicite, c'est nous.
+ * Retourne la taille de la trame (86 octets) ou -1 si la NS est invalide ou à ignorer. */
+static int build_na(uint8_t *out, const uint8_t *f, int len) {
+    static const uint8_t zero[16];
+    if (len < 14 + 40 + 24) return -1;
+    const uint8_t *ip = f + 14, *icmp = ip + 40;
+    if ((ip[0] >> 4) != 6 || ip[6] != 58 || ip[7] != 255) return -1; /* hop limit 255 : lien local */
+    int plen = ip[4] << 8 | ip[5];
+    if (plen < 24 || plen > len - 14 - 40) return -1;
+    if (icmp[0] != 135 || icmp[1] != 0) return -1;
+    if (!memcmp(ip + 8, zero, 16) || ip[8] == 0xff) return -1;       /* DAD d'un autre / source multicast */
+    const uint8_t *target = icmp + 8;
+    if (target[0] == 0xff) return -1;
+    memcpy(out, f + 6, 6); memcpy(out + 6, my_mac, 6); putbe16(out + 12, 0x86DD);
+    uint8_t *o = out + 14;
+    memset(o, 0, 40 + 32);
+    o[0] = 0x60; putbe16(o + 4, 32); o[6] = 58; o[7] = 255;
+    memcpy(o + 8, target, 16); memcpy(o + 24, ip + 8, 16);
+    uint8_t *m = o + 40;
+    m[0] = 136; m[4] = 0x60;                                          /* flags : Solicited + Override */
+    memcpy(m + 8, target, 16);
+    m[24] = 2; m[25] = 1; memcpy(m + 26, my_mac, 6);                  /* option : adresse MAC cible */
+    putbe16(m + 2, icmp6_csum(o + 8, o + 24, m, 32));
+    return 14 + 40 + 32;
+}
+
+struct ra { int have_prefix; uint8_t prefix[16]; uint8_t plen; uint16_t router_lifetime; uint8_t router[16]; };
+
+/* Analyse une annonce de routeur (RA). Tout vient du réseau : bornes vérifiées à chaque option.
+ * Retourne 0 si c'est une RA valide (have_prefix indique si un préfixe /64 auto-configurable y figure). */
+static int parse_ra(const uint8_t *f, int len, struct ra *r) {
+    static const uint8_t zero8[8];
+    memset(r, 0, sizeof *r);
+    if (len < 14 + 40 + 16) return -1;
+    const uint8_t *ip = f + 14, *icmp = ip + 40;
+    if ((ip[0] >> 4) != 6 || ip[6] != 58 || ip[7] != 255) return -1;
+    if (ip[8] != 0xfe || (ip[9] & 0xc0) != 0x80) return -1;          /* la source doit être link-local */
+    int plen = ip[4] << 8 | ip[5];
+    if (plen < 16 || plen > len - 14 - 40) return -1;
+    if (icmp[0] != 134 || icmp[1] != 0) return -1;
+    r->router_lifetime = icmp[6] << 8 | icmp[7];
+    memcpy(r->router, ip + 8, 16);                                   /* adresse link-local du routeur */
+    const uint8_t *o = icmp + 16, *end = icmp + plen;
+    while (o + 2 <= end) {
+        int l = o[1] * 8;
+        if (l == 0 || o + l > end) break;
+        if (o[0] == 3 && l >= 32 && !r->have_prefix) {               /* Prefix Information */
+            const uint8_t *p = o + 16;
+            int onlink_auto = (o[3] & 0x40) != 0;                    /* drapeau A : SLAAC autorisé */
+            int link_local = p[0] == 0xfe && (p[1] & 0xc0) == 0x80;
+            if (o[2] == 64 && onlink_auto && be32(o + 4) > 0 && p[0] != 0xff && !link_local &&
+                memcmp(p, zero8, 8)) {
+                memcpy(r->prefix, p, 16);
+                r->plen = o[2];
+                r->have_prefix = 1;
+            }
+        }
+        o += l;
+    }
+    return 0;
+}
+
+/* Sollicitation de routeur (RS) vers ff02::2, avec notre adresse MAC. */
+static int build_rs(uint8_t *out) {
+    static const uint8_t dmac[6] = {0x33, 0x33, 0, 0, 0, 2};
+    memset(out, 0, 14 + 40 + 16);
+    memcpy(out, dmac, 6); memcpy(out + 6, my_mac, 6); putbe16(out + 12, 0x86DD);
+    uint8_t *o = out + 14;
+    o[0] = 0x60; putbe16(o + 4, 16); o[6] = 58; o[7] = 255;
+    o[8] = 0xfe; o[9] = 0x80;                                         /* fe80:: + EUI-64 de notre MAC */
+    o[16] = my_mac[0] ^ 2; o[17] = my_mac[1]; o[18] = my_mac[2]; o[19] = 0xff; o[20] = 0xfe;
+    o[21] = my_mac[3]; o[22] = my_mac[4]; o[23] = my_mac[5];
+    o[24] = 0xff; o[25] = 0x02; o[39] = 2;                            /* ff02::2 : tous les routeurs */
+    uint8_t *m = o + 40;
+    m[0] = 133; m[8] = 1; m[9] = 1; memcpy(m + 10, my_mac, 6);
+    putbe16(m + 2, icmp6_csum(o + 8, o + 24, m, 16));
+    return 14 + 40 + 16;
+}
+
+static void configure_ipv6(void) {
+    char a[INET6_ADDRSTRLEN];
+    inet_ntop(AF_INET6, v6_addr, a, sizeof a);
+    LOG("IPv6: adresse %s/64 sur %s", a, utun_name);
+    sh("/sbin/ifconfig %s inet6 %s prefixlen 64 alias", utun_name, a);
+    if (want_route) {
+        sh("/sbin/route -q -n add -inet6 -net ::/1 -interface %s", utun_name);
+        sh("/sbin/route -q -n add -inet6 -net 8000::/1 -interface %s", utun_name);
+        v6_routes = 1;
+        /* Sans partie IPv6 dans le service réseau, macOS ne demande que des enregistrements A
+         * à notre résolveur : les noms IPv6 seuls ne se résolvent pas. */
+        char rt[INET6_ADDRSTRLEN], s[512];
+        inet_ntop(AF_INET6, v6_router, rt, sizeof rt);
+        snprintf(s, sizeof s,
+                 "d.init\nd.add Addresses * %s\nd.add PrefixLength # 64\nd.add Router %s\nd.add InterfaceName %s\n"
+                 "set State:/Network/Service/rndis-tether/IPv6\n", a, rt, utun_name);
+        scutil_run(s);
+        v6_svc = 1;
+    }
+}
+
 static void unconfigure_iface(void) {
+    if (v6_svc) {
+        scutil_run("remove State:/Network/Service/rndis-tether/IPv6\n");
+        v6_svc = 0;
+    }
+    if (v6_routes) {
+        sh("/sbin/route -q -n delete -inet6 -net ::/1 -interface %s", utun_name);
+        sh("/sbin/route -q -n delete -inet6 -net 8000::/1 -interface %s", utun_name);
+        v6_routes = 0;
+    }
     if (dns_applied) {
         scutil_run("remove State:/Network/Service/rndis-tether/DNS\nremove State:/Network/Service/rndis-tether/IPv4\n");
         dns_applied = 0;
@@ -434,12 +571,54 @@ static void handle_arp(const uint8_t *f, int len) {
     }
 }
 
+/* IPv6 reçu du téléphone : répond aux NS, exploite la première RA, relaie le reste vers utun. */
+static void handle_ipv6(const uint8_t *f, int len) {
+    if (len < 14 + 40) return;
+    const uint8_t *ip = f + 14;
+    if ((ip[0] >> 4) != 6) return;
+    int n = 40 + (ip[4] << 8 | ip[5]);
+    if (n > len - 14 || n > 2048) return;                 /* tronqué ou trop grand : on jette */
+    if (ip[6] == 58 && n >= 44) {                         /* ICMPv6 */
+        if (ip[40] == 135) {                              /* sollicitation de voisin */
+            uint8_t na[14 + 40 + 32];
+            if (build_na(na, f, 14 + n) > 0) send_frame(na, sizeof na);
+            return;
+        }
+        if (ip[40] == 134) {                              /* annonce de routeur : on s'en sert, le noyau ne la voit pas */
+            struct ra r;
+            if (parse_ra(f, 14 + n, &r) == 0 && r.have_prefix && !v6_claimed) {
+                v6_claimed = 1;
+                memcpy(v6_router, r.router, 16);
+                memcpy(v6_addr, r.prefix, 8);
+                do { arc4random_buf(v6_addr + 8, 8); v6_addr[8] &= ~0x02; } /* identifiant aléatoire, non EUI-64 */
+                while (!memcmp(v6_addr + 8, (uint8_t[8]){0}, 8));
+                __atomic_store_n(&v6_pending, 1, __ATOMIC_RELEASE);
+            }
+            return;
+        }
+    }
+    uint8_t out[4 + 2048];
+    putbe32(out, AF_INET6);
+    memcpy(out + 4, ip, n);
+    if (write(utun_fd, out, 4 + n) < 0 && verbose) perror("write utun");
+}
+
 static void rx_frame(const uint8_t *f, int len, void *arg) {
     (void)arg;
     if (len < 14) return;
     uint16_t et = f[12] << 8 | f[13];
     if (et == 0x0806) { handle_arp(f, len); return; }
-    if (et != 0x0800 || len < 34) return; /* IPv6 non géré */
+    if (et == 0x86DD) { if (ipv6_on) handle_ipv6(f, len); return; }
+    if (et != 0x0800 || len < 34) return;
+    /* réponse du serveur DHCP à notre demande de renouvellement : on le consigne, sans le relayer */
+    if (renew_xid && f[23] == 17) {
+        struct lease L;
+        if (dhcp_parse(f, len, renew_xid, &L) == 0) {
+            if (L.type == 5) { LOG("DHCP: bail renouvelé (%us)", L.secs); renew_xid = 0; }
+            else if (L.type == 6) LOG("DHCP: renouvellement refusé (NAK)");
+            return;
+        }
+    }
     if (!memcmp(f + 26, &gw_ip, 4)) memcpy(gw_mac, f + 6, 6);
     int iplen = f[16] << 8 | f[17];
     int n = len - 14;
@@ -479,8 +658,19 @@ static void *tx_thread(void *a) {
         if (n <= 4) continue;
         uint32_t af = be32(in);
         int len = n - 4;
-        if (af != AF_INET || len > MTU) continue; /* IPv6 non géré */
-        memcpy(frame, gw_mac, 6); memcpy(frame + 6, my_mac, 6); putbe16(frame + 12, 0x0800);
+        if (len > MTU) continue;
+        memcpy(frame, gw_mac, 6); memcpy(frame + 6, my_mac, 6);
+        if (af == AF_INET) {
+            putbe16(frame + 12, 0x0800);
+        } else if (af == AF_INET6 && ipv6_on && len >= 40) {
+            putbe16(frame + 12, 0x86DD);
+            if (in[4 + 24] == 0xff) {                          /* destination multicast : MAC 33:33:<4 derniers octets> */
+                frame[0] = frame[1] = 0x33;
+                memcpy(frame + 2, in + 4 + 24 + 12, 4);
+            }
+        } else {
+            continue;
+        }
         memcpy(frame + 14, in + 4, len);
         int r = send_frame(frame, 14 + len);
         if (r == 0) { fails = 0; continue; }
@@ -498,12 +688,26 @@ static void *tx_thread(void *a) {
 static void *ctrl_thread(void *a) {
     (void)a;
     uint8_t n[16], resp[4096], f[700];
-    time_t next_renew = time(NULL) + renew_period;
+    time_t next_renew = time(NULL) + renew_period, next_rs = time(NULL) + 1;
+    int rs_sent = 0;
     while (running) {
         if (renew_period && time(NULL) >= next_renew) {
-            VLOG("DHCP renouvellement");
-            send_frame(f, build_dhcp(f, 3, rand(), my_ip, srv_ip));
+            LOG("DHCP: demande de renouvellement");
+            renew_xid = arc4random() | 1;                     /* jamais 0 */
+            send_frame(f, build_dhcp(f, 3, renew_xid, my_ip, srv_ip));
             next_renew += renew_period;
+        }
+        if (ipv6_on) {
+            if (__atomic_load_n(&v6_pending, __ATOMIC_ACQUIRE)) {
+                __atomic_store_n(&v6_pending, 0, __ATOMIC_RELAXED);
+                configure_ipv6();
+            } else if (!v6_claimed && rs_sent < 5 && time(NULL) >= next_rs) {
+                uint8_t rs[14 + 40 + 16];                     /* on sollicite une RA (réponse quasi immédiate) */
+                VLOG("IPv6: sollicitation de routeur (%d)", rs_sent + 1);
+                send_frame(rs, build_rs(rs));
+                rs_sent++;
+                next_rs = time(NULL) + 3;
+            }
         }
         if (!ep_int) { sleep(1); continue; }
         int got = 0;
@@ -588,6 +792,7 @@ static void usage(const char *p) {
                     "  -w  attendre le téléphone et se reconnecter après un débranchement\n"
                     "  -a  activer le Modem USB du téléphone via adb (débogage USB requis)\n"
                     "  -U  utilisateur pour adb (défaut: SUDO_USER ; requis en LaunchDaemon)\n"
+                    "  -4  IPv4 uniquement (désactive le relais IPv6)\n"
                     "  -v  logs détaillés\n"
                     "  -d  cibler un appareil précis (hex), ex: 18d1:4ee3\n", p);
 }
@@ -595,8 +800,9 @@ static void usage(const char *p) {
 int main(int argc, char **argv) {
     unsigned vid = 0, pid = 0;
     int opt;
-    while ((opt = getopt(argc, argv, "rwavd:U:h")) != -1) {
+    while ((opt = getopt(argc, argv, "rwavd:U:4h")) != -1) {
         switch (opt) {
+        case '4': ipv6_on = 0; break;
         case 'U': adb_user = optarg; break;
         case 'a': auto_adb = 1; break;
         case 'r': want_route = 1; break;
@@ -643,7 +849,8 @@ int main(int argc, char **argv) {
 
 static int session(void) {
     int rc = 1;
-    running = 1; utun_fd = -1; my_ip = gw_ip = srv_ip = renew_period = 0;
+    running = 1; utun_fd = -1; my_ip = gw_ip = srv_ip = renew_period = renew_xid = 0;
+    v6_claimed = v6_pending = v6_routes = v6_svc = 0;
     status_tick("connecting");
     if (libusb_claim_interface(h, ctrl_if) || libusb_claim_interface(h, data_if)) {
         LOG("Impossible de réserver les interfaces USB"); goto out;

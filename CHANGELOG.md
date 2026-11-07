@@ -6,6 +6,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 ## [Unreleased]
 
 ### Added
+- IPv6 support: router solicitation/advertisement with SLAAC address, neighbor advertisement replies, IPv6 packet relay in both directions, `::/1` + `8000::/1` routes with `-r`, and an IPv6 entry in the SystemConfiguration service so macOS asks for AAAA records. Validated on a Galaxy S24 Ultra; `-4` turns it off.
+- The DHCP lease renewal is now logged ("demande de renouvellement" / "bail renouvelé") so it can be observed.
 - Unit and fuzz tests (`make test`) run under AddressSanitizer and UBSan, without a phone or root.
 - Continuous integration (build with `-Werror`, tests, menu bar app build, shell script lint).
 - Security policy, code of conduct, support guide, issue and pull request templates, Dependabot.

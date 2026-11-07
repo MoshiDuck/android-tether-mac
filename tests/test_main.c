@@ -301,11 +301,232 @@ static void test_fuzz_rx_frame(void) {
             p[12] = 0x08; p[13] = 0x06;
             memcpy(p + 38, (uint8_t[]){198, 51, 100, 7}, 4);
         }
+        if (len >= 14 + 44 && (iter % 5) == 1) {  /* IPv6 : ICMPv6 NS/RA plausibles, champs aléatoires */
+            p[12] = 0x86; p[13] = 0xDD;
+            p[14] = 0x60; p[14 + 6] = 58; p[14 + 7] = (iter & 8) ? 255 : rnd();
+            p[14 + 40] = (iter & 16) ? 134 : 135; p[14 + 41] = 0;
+            p[14 + 8] = (iter & 32) ? 0xfe : p[14 + 8]; p[14 + 9] = (iter & 32) ? 0x80 : p[14 + 9];
+            if (iter & 64) { p[14 + 4] = 0; p[14 + 5] = (len - 14 - 40) & 0xff; }
+            v6_claimed = 0;                       /* rejoue la prise en compte de RA à chaque fois */
+        }
         rx_frame(p, len, NULL);
         free(p);
     }
     close(utun_fd);
     utun_fd = -1;
+}
+
+/* ---------- IPv6 ---------- */
+
+/* checksum ICMPv6 par une construction différente (pseudo-en-tête explicite), pour recouper icmp6_csum */
+static uint16_t ref_csum6(const uint8_t *src, const uint8_t *dst, const uint8_t *msg, int len) {
+    uint8_t *b = calloc(1, 40 + len + 1);
+    memcpy(b, src, 16); memcpy(b + 16, dst, 16);
+    putbe32(b + 32, len); b[39] = 58;
+    memcpy(b + 40, msg, len);
+    uint32_t s = 0;
+    int total = 40 + len + (len & 1);
+    for (int i = 0; i < total; i += 2) s += b[i] << 8 | b[i + 1];
+    while (s >> 16) s = (s & 0xffff) + (s >> 16);
+    free(b);
+    return ~s;
+}
+
+static void test_icmp6_csum(void) {
+    uint8_t src[16], dst[16], msg[41];
+    for (int iter = 0; iter < 2000; iter++) {
+        for (int i = 0; i < 16; i++) { src[i] = rnd(); dst[i] = rnd(); }
+        int len = 1 + rnd() % 40;                 /* inclut des longueurs impaires */
+        for (int i = 0; i < len; i++) msg[i] = rnd();
+        CHECK(icmp6_csum(src, dst, msg, len) == ref_csum6(src, dst, msg, len));
+    }
+}
+
+static const uint8_t PHONE_MAC[6] = {0x7e, 0x02, 0x31, 0xd7, 0xbd, 0xf2};
+
+/* Trame NS (sollicitation de voisin) venant du téléphone. */
+static int make_ns(uint8_t *f, const uint8_t *src_ip, const uint8_t *target) {
+    memset(f, 0, 14 + 40 + 32);
+    memcpy(f, (uint8_t[]){0x33, 0x33, 0xff, 0, 0, 1}, 6); memcpy(f + 6, PHONE_MAC, 6); putbe16(f + 12, 0x86DD);
+    uint8_t *ip = f + 14;
+    ip[0] = 0x60; putbe16(ip + 4, 32); ip[6] = 58; ip[7] = 255;
+    memcpy(ip + 8, src_ip, 16);
+    memcpy(ip + 24, (uint8_t[]){0xff, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0xff, 0, 0, 1}, 16);
+    uint8_t *m = ip + 40;
+    m[0] = 135; memcpy(m + 8, target, 16);
+    m[24] = 1; m[25] = 1; memcpy(m + 26, PHONE_MAC, 6);
+    putbe16(m + 2, icmp6_csum(ip + 8, ip + 24, m, 32));
+    return 14 + 40 + 32;
+}
+
+static void test_build_na(void) {
+    memcpy(my_mac, TEST_MAC, 6);
+    uint8_t phone_ll[16] = {0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0x7c, 0x02, 0x31, 0xff, 0xfe, 0xd7, 0xbd, 0xf2};
+    uint8_t target[16] = {0x26, 0, 0x03, 0x83, 0x0a, 0x44, 0x4d, 0x02, 0, 0, 0, 0, 0, 0, 0xab, 0xcd};
+    uint8_t f[200], out[200];
+    int n = make_ns(f, phone_ll, target);
+    CHECK(build_na(out, f, n) == 86);
+    CHECK(!memcmp(out, PHONE_MAC, 6) && !memcmp(out + 6, TEST_MAC, 6));   /* répond au téléphone, depuis notre MAC */
+    CHECK(out[12] == 0x86 && out[13] == 0xDD);
+    const uint8_t *ip = out + 14, *m = ip + 40;
+    CHECK(ip[6] == 58 && ip[7] == 255 && (ip[4] << 8 | ip[5]) == 32);
+    CHECK(!memcmp(ip + 8, target, 16) && !memcmp(ip + 24, phone_ll, 16)); /* source = la cible sollicitée */
+    CHECK(m[0] == 136 && m[1] == 0 && m[4] == 0x60);                       /* NA, Solicited + Override */
+    CHECK(!memcmp(m + 8, target, 16));
+    CHECK(m[24] == 2 && m[25] == 1 && !memcmp(m + 26, TEST_MAC, 6));       /* option : notre MAC */
+    CHECK(ref_csum6(ip + 8, ip + 24, m, 32) == 0);                         /* checksum valide */
+
+    /* sollicitations à ne pas traiter */
+    uint8_t g[200];
+    memcpy(g, f, n); g[14 + 7] = 254;
+    CHECK(build_na(out, g, n) < 0);                                        /* hop limit != 255 */
+    memcpy(g, f, n); memset(g + 14 + 8, 0, 16);
+    CHECK(build_na(out, g, n) < 0);                                        /* source :: (DAD du téléphone) */
+    memcpy(g, f, n); g[14 + 40 + 1] = 1;
+    CHECK(build_na(out, g, n) < 0);                                        /* code != 0 */
+    memcpy(g, f, n); g[14 + 40] = 136;
+    CHECK(build_na(out, g, n) < 0);                                        /* pas une NS */
+    memcpy(g, f, n); g[14 + 40 + 8] = 0xff;
+    CHECK(build_na(out, g, n) < 0);                                        /* cible multicast */
+    memcpy(g, f, n); putbe16(g + 14 + 4, 500);
+    CHECK(build_na(out, g, n) < 0);                                        /* longueur annoncée > trame */
+    CHECK(build_na(out, f, 60) < 0);                                       /* trame tronquée */
+}
+
+static void test_build_rs(void) {
+    memcpy(my_mac, TEST_MAC, 6);
+    uint8_t f[100];
+    CHECK(build_rs(f) == 70);
+    CHECK(!memcmp(f, (uint8_t[]){0x33, 0x33, 0, 0, 0, 2}, 6) && !memcmp(f + 6, TEST_MAC, 6));
+    const uint8_t *ip = f + 14, *m = ip + 40;
+    CHECK(ip[0] == 0x60 && ip[6] == 58 && ip[7] == 255 && (ip[4] << 8 | ip[5]) == 16);
+    CHECK(ip[8] == 0xfe && ip[9] == 0x80 && ip[16] == (TEST_MAC[0] ^ 2) && ip[19] == 0xff && ip[20] == 0xfe);
+    CHECK(ip[24] == 0xff && ip[25] == 0x02 && ip[39] == 2);                /* ff02::2 */
+    CHECK(m[0] == 133 && m[8] == 1 && m[9] == 1 && !memcmp(m + 10, TEST_MAC, 6));
+    CHECK(ref_csum6(ip + 8, ip + 24, m, 16) == 0);
+}
+
+/* Trame RA du téléphone ; opts/optlen = options ICMPv6 à la suite de l'en-tête RA (16 octets). */
+static int make_ra(uint8_t *f, const uint8_t *opts, int optlen) {
+    int plen = 16 + optlen;
+    memset(f, 0, 14 + 40 + plen);
+    memcpy(f, (uint8_t[]){0x33, 0x33, 0, 0, 0, 1}, 6); memcpy(f + 6, PHONE_MAC, 6); putbe16(f + 12, 0x86DD);
+    uint8_t *ip = f + 14;
+    ip[0] = 0x60; putbe16(ip + 4, plen); ip[6] = 58; ip[7] = 255;
+    memcpy(ip + 8, (uint8_t[]){0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0x7c, 0x02, 0x31, 0xff, 0xfe, 0xd7, 0xbd, 0xf2}, 16);
+    memcpy(ip + 24, (uint8_t[]){0xff, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, 16);
+    uint8_t *m = ip + 40;
+    m[0] = 134; m[6] = 0x07; m[7] = 0x08;                                  /* durée de vie du routeur : 1800 s */
+    memcpy(m + 16, opts, optlen);
+    putbe16(m + 2, icmp6_csum(ip + 8, ip + 24, m, plen));
+    return 14 + 40 + plen;
+}
+
+static void put_prefix_opt(uint8_t *o, uint8_t plen, uint8_t flags, uint32_t valid) {
+    memset(o, 0, 32);
+    o[0] = 3; o[1] = 4; o[2] = plen; o[3] = flags;
+    putbe32(o + 4, valid); putbe32(o + 8, valid / 2);
+    memcpy(o + 16, (uint8_t[]){0x26, 0, 0x03, 0x83, 0x0a, 0x44, 0x4d, 0x02}, 8);
+}
+
+static void test_parse_ra(void) {
+    uint8_t f[300], opts[64];
+    struct ra r;
+    put_prefix_opt(opts, 64, 0xC0, 3600);                                  /* L + A */
+    int n = make_ra(f, opts, 32);
+    CHECK(parse_ra(f, n, &r) == 0 && r.have_prefix && r.plen == 64 && r.router_lifetime == 1800);
+    CHECK(!memcmp(r.prefix, (uint8_t[]){0x26, 0, 0x03, 0x83, 0x0a, 0x44, 0x4d, 0x02}, 8));
+    CHECK(!memcmp(r.router, (uint8_t[]){0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0x7c, 0x02, 0x31, 0xff, 0xfe, 0xd7, 0xbd, 0xf2}, 16));
+
+    /* option SLLA (type 1) avant le préfixe : bien ignorée, préfixe trouvé quand même */
+    uint8_t two[64] = {1, 1, 0x7e, 0x02, 0x31, 0xd7, 0xbd, 0xf2};
+    put_prefix_opt(two + 8, 64, 0xC0, 3600);
+    n = make_ra(f, two, 40);
+    CHECK(parse_ra(f, n, &r) == 0 && r.have_prefix);
+
+    put_prefix_opt(opts, 64, 0x80, 3600);                                  /* A absent : pas de SLAAC */
+    n = make_ra(f, opts, 32);
+    CHECK(parse_ra(f, n, &r) == 0 && !r.have_prefix);
+    put_prefix_opt(opts, 48, 0xC0, 3600);                                  /* pas un /64 */
+    n = make_ra(f, opts, 32);
+    CHECK(parse_ra(f, n, &r) == 0 && !r.have_prefix);
+    put_prefix_opt(opts, 64, 0xC0, 0);                                     /* durée de validité nulle */
+    n = make_ra(f, opts, 32);
+    CHECK(parse_ra(f, n, &r) == 0 && !r.have_prefix);
+    put_prefix_opt(opts, 64, 0xC0, 3600); opts[16] = 0xfe; opts[17] = 0x80; /* préfixe link-local */
+    n = make_ra(f, opts, 32);
+    CHECK(parse_ra(f, n, &r) == 0 && !r.have_prefix);
+
+    /* option de longueur 0 : doit s'arrêter (pas de boucle infinie) */
+    memset(opts, 0, 32); opts[0] = 25;
+    n = make_ra(f, opts, 32);
+    CHECK(parse_ra(f, n, &r) == 0 && !r.have_prefix);
+    /* option qui dépasse la trame */
+    put_prefix_opt(opts, 64, 0xC0, 3600); opts[1] = 20;
+    n = make_ra(f, opts, 32);
+    CHECK(parse_ra(f, n, &r) == 0 && !r.have_prefix);
+
+    /* RA à rejeter */
+    put_prefix_opt(opts, 64, 0xC0, 3600);
+    n = make_ra(f, opts, 32);
+    uint8_t g[300];
+    memcpy(g, f, n); g[14 + 7] = 64;
+    CHECK(parse_ra(g, n, &r) < 0);                                         /* hop limit */
+    memcpy(g, f, n); g[14 + 8] = 0x26;
+    CHECK(parse_ra(g, n, &r) < 0);                                         /* source non link-local */
+    memcpy(g, f, n); g[14 + 40] = 135;
+    CHECK(parse_ra(g, n, &r) < 0);                                         /* pas une RA */
+    CHECK(parse_ra(f, 50, &r) < 0);                                        /* tronquée */
+}
+
+static void test_handle_ipv6(void) {
+    utun_fd = open("/dev/null", O_WRONLY);
+    memcpy(my_mac, TEST_MAC, 6);
+    uint8_t f[300], opts[64];
+    put_prefix_opt(opts, 64, 0xC0, 3600);
+    int n = make_ra(f, opts, 32);
+
+    v6_claimed = v6_pending = 0;
+    handle_ipv6(f, n);
+    CHECK(v6_claimed == 1 && v6_pending == 1);                             /* adresse prête à configurer */
+    CHECK(v6_router[0] == 0xfe && v6_router[1] == 0x80 && v6_router[15] == 0xf2);
+    CHECK(!memcmp(v6_addr, (uint8_t[]){0x26, 0, 0x03, 0x83, 0x0a, 0x44, 0x4d, 0x02}, 8));
+    CHECK(!(v6_addr[8] & 0x02));                                           /* identifiant « local », non EUI-64 */
+    uint8_t first[16];
+    memcpy(first, v6_addr, 16);
+    v6_pending = 0;
+    handle_ipv6(f, n);                                                     /* une seconde RA ne change rien */
+    CHECK(v6_pending == 0 && !memcmp(first, v6_addr, 16));
+
+    /* NS : traitée sans planter même sans périphérique USB (send_frame renvoie une erreur) */
+    uint8_t ns[200], ll[16] = {0xfe, 0x80, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8}, tgt[16] = {0x26, 0, 1};
+    int m = make_ns(ns, ll, tgt);
+    handle_ipv6(ns, m);
+
+    /* paquet IPv6 ordinaire (UDP) : relayé vers utun, trames trop courtes ou tronquées jetées */
+    uint8_t pkt[14 + 40 + 8] = {0};
+    pkt[12] = 0x86; pkt[13] = 0xDD; pkt[14] = 0x60; pkt[14 + 5] = 8; pkt[14 + 6] = 17; pkt[14 + 7] = 64;
+    handle_ipv6(pkt, sizeof pkt);
+    handle_ipv6(pkt, 30);
+    putbe16(pkt + 14 + 4, 60000);
+    handle_ipv6(pkt, sizeof pkt);
+    close(utun_fd);
+    utun_fd = -1;
+    CHECK(1);
+}
+
+/* Le renouvellement DHCP est consigné quand le serveur répond ACK (sans relayer la trame). */
+static void test_renew_ack(void) {
+    memcpy(my_mac, TEST_MAC, 6);
+    uint8_t f[700];
+    int n = make_reply(f, 0x1234ABCDu, 5, (const uint8_t[]){51, 4, 0, 0, 0x0e, 0x10}, 6);
+    renew_xid = 0x1234ABCDu;
+    rx_frame(f, n, NULL);
+    CHECK(renew_xid == 0);                                                 /* ACK reconnu */
+    renew_xid = 0x1111u;
+    rx_frame(f, n, NULL);
+    CHECK(renew_xid == 0x1111u);                                           /* autre xid : ignoré */
+    renew_xid = 0;
 }
 
 int main(void) {
@@ -317,6 +538,12 @@ int main(void) {
     test_parse_mac();
     test_fuzz();
     test_fuzz_rx_frame();
+    test_icmp6_csum();
+    test_build_na();
+    test_build_rs();
+    test_parse_ra();
+    test_handle_ipv6();
+    test_renew_ack();
     printf("%d vérifications, %d échec(s)\n", checks, failures);
     return failures ? 1 : 0;
 }

@@ -20,6 +20,7 @@ macOS has no built-in RNDIS driver, and kext-based drivers such as HoRNDIS no lo
 - Menu bar icon: status, enable/disable
 - Optionally switches the phone into USB-tethering mode through `adb`
 - Applies the phone's DNS (so you can turn Wi-Fi off), renews the DHCP lease, reconnects after unplugging
+- IPv4 **and IPv6** (when the phone's network provides it): IPv6 traffic goes through the phone too, instead of leaking out through Wi-Fi
 
 ## Requirements
 
@@ -63,6 +64,7 @@ sudo ./rndis-tether -v -r -w -a
 | `-r` | Route all traffic through the phone (split routes `0/1` + `128/1`) and apply its DNS; both removed on exit |
 | `-w` | Wait for the phone and reconnect after unplugging |
 | `-a` | Enable tethering on the phone through `adb` (needs USB debugging) |
+| `-4` | IPv4 only (turn the IPv6 relay off) |
 | `-U user` | User to run `adb` as (default `$SUDO_USER`; set by the LaunchDaemon) |
 | `-d vid:pid` | Target a specific device (hex) |
 | `-v` | Verbose logs |
@@ -76,7 +78,7 @@ Log file when installed as a service: `/var/log/rndis-tether.log`.
 1. Finds an RNDIS interface (class `E0/01/03`, `EF/04/01` or `02/02/FF`) with its bulk data interface.
 2. RNDIS handshake (`INITIALIZE`, MAC query, packet filter), keepalive replies on the interrupt endpoint.
 3. DHCP client over raw Ethernet frames, then ARP responder.
-4. IPv4 packets are copied between the phone and a `utun` interface; Ethernet headers are added/stripped in userspace.
+4. IPv4 and IPv6 packets are copied between the phone and a `utun` interface; Ethernet headers are added/stripped in userspace. IPv6 uses a router solicitation, SLAAC and neighbor advertisements.
 5. The menu bar app talks to the root service through two files in `/Users/Shared` (`rndis-tether.disabled`, `rndis-tether.status`).
 
 ## Compatibility
@@ -90,7 +92,7 @@ This has only been tested on a **Samsung Galaxy S24 Ultra**. Other phones should
 
 ## Limitations
 
-- IPv4 only (IPv6 is ignored; apps fall back to IPv4)
+- IPv6 needs the phone to advertise a `/64` prefix (it did on the tested phone); otherwise the tether stays IPv4-only. IPv6-only DNS servers announced by the router are not used. Use `-4` to turn IPv6 off. IPv6 is not faster than IPv4 here — the mobile network dominates
 - DHCP lease renewal (every half lease, ~30 min) has not been observed over a full lease yet
 - If the service is killed with `kill -9`, the routes `0.0.0.0/1` and `128.0.0.0/1` may remain: `sudo route -n delete -net 0.0.0.0/1` and `128.0.0.0/1`
 

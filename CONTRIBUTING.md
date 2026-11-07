@@ -5,7 +5,7 @@ Please follow the [Code of Conduct](CODE_OF_CONDUCT.md). For security problems s
 Thanks for helping! The most valuable contributions:
 
 - **Phone reports**: open an issue with your phone model, its USB id (`ioreg -p IOUSB -l -w0 | grep -E 'idVendor|idProduct'`), and the output of `sudo ./rndis-tether -v -r -a`.
-- **Fixes and features**: IPv6, a "failover only" mode, Homebrew packaging, other RNDIS quirks.
+- **Fixes and features**: IPv6 RDNSS support, a "failover only" mode, Homebrew packaging, other RNDIS quirks.
 
 ## Pull requests
 

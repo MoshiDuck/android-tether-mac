@@ -41,6 +41,7 @@ sudo ./rndis-tether -v -r -w -a
 - `-r` route tout via le téléphone et applique son DNS (retirés à la sortie)
 - `-w` attend le téléphone et se reconnecte après un débranchement
 - `-a` active le Modem USB du téléphone via `adb` (débogage USB requis)
+- `-4` IPv4 uniquement (désactive le relais IPv6)
 - `-U user` utilisateur pour `adb` (défaut `$SUDO_USER`)
 - `-d vid:pid` cible un appareil précis ; `-v` logs détaillés
 
@@ -52,7 +53,7 @@ Explication détaillée (USB, RNDIS, utun, DHCP, DNS, service) : [docs/how-it-wo
 
 ## Limites
 
-- IPv4 uniquement
+- IPv6 demande que le téléphone annonce un préfixe `/64` (c'était le cas sur le téléphone testé) ; sinon le tethering reste en IPv4. `-4` désactive IPv6. IPv6 n'est pas plus rapide qu'IPv4 ici : le réseau mobile domine
 - Testé uniquement sur un **Samsung Galaxy S24 Ultra** (`04e8:6864`). Les autres téléphones ne sont pas testés : les retours sont les bienvenus (issue avec modèle et sortie de `sudo ./rndis-tether -v -r -a`)
 - Le renouvellement DHCP (à mi-bail, ~30 min) n'a pas encore été observé sur un bail complet
 - Si le service est tué avec `kill -9`, les routes `0.0.0.0/1` et `128.0.0.0/1` peuvent rester : `sudo route -n delete -net 0.0.0.0/1` et `128.0.0.0/1`

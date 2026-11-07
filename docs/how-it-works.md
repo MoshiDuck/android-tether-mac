@@ -71,13 +71,22 @@ Every Ethernet frame is wrapped in an RNDIS `PACKET` message: a 44-byte header (
 A `utun` interface carries only **IP packets**, each prefixed by 4 bytes saying the address family (IPv4 or IPv6). The phone speaks **Ethernet**. The driver translates:
 
 - **Phone → Mac**: strip the 14-byte Ethernet header (and any Ethernet padding, using the IP length field), prepend the 4-byte family header, write to `utun`.
-- **Mac → phone**: read an IPv4 packet from `utun`, drop the family header, add an Ethernet header (destination: the phone's MAC, source: ours), wrap in RNDIS, send over USB.
-- **IPv6 is dropped** (not implemented); apps fall back to IPv4.
+- **Mac → phone**: read an IPv4 or IPv6 packet from `utun`, drop the family header, add an Ethernet header (destination: the phone's MAC, source: ours; for IPv6 multicast, `33:33:` plus the last four bytes of the address), wrap in RNDIS, send over USB.
 
 Because there is no real network card, the driver also plays the roles a card's network stack would:
 
 - **DHCP client**: sends `DISCOVER`, takes the `OFFER`, sends `REQUEST`, receives `ACK` — as raw Ethernet/IP/UDP frames with the broadcast flag, since we have no address yet. It reads address, netmask, router, DNS and lease time. The lease is renewed at half its length with a new `REQUEST`.
 - **ARP**: answers "who has our IP?" from the phone, and learns the phone's MAC from ARP and IP traffic.
+
+### IPv6
+
+The same idea applies to IPv6, with ICMPv6 doing the work of ARP and DHCP:
+
+- **Router solicitation / advertisement**: shortly after connecting, the driver sends a Router Solicitation (`ff02::2`). The phone answers with a Router Advertisement carrying a `/64` prefix. The driver builds an address from that prefix plus a random interface identifier (SLAAC), and configures it with `ifconfig inet6`. Only the first usable advertisement is used per session.
+- **Neighbor discovery**: the phone asks "who has this address?" with Neighbor Solicitations. The phone is the only other host on the link, so the driver answers any such request with a Neighbor Advertisement carrying our MAC address — otherwise the phone could not send packets back. Requests that are invalid (wrong hop limit, unspecified source, multicast target…) are ignored.
+- **Checksums**: ICMPv6 checksums cover an IPv6 pseudo-header; they are computed by `icmp6_csum`, which the tests cross-check against an independent implementation.
+- Everything read from the network is bounds-checked and fuzzed, like the rest of the parsers.
+- `-4` turns all of this off.
 
 ## 5. Integrating with macOS
 
@@ -85,13 +94,15 @@ After DHCP, the driver runs `ifconfig` to set the address on the `utun` interfac
 
 ### Routes (`-r`)
 
-Instead of replacing the default route, it adds two **more specific** routes, `0.0.0.0/1` and `128.0.0.0/1`, via the phone. Together they cover all of IPv4 and beat the default route, but the existing default route stays untouched. Removing the two routes restores everything.
+Instead of replacing the default route, it adds two **more specific** routes, `0.0.0.0/1` and `128.0.0.0/1`, via the phone. Together they cover all of IPv4 and beat the default route, but the existing default route stays untouched. Removing the two routes restores everything. When an IPv6 address has been configured, the same trick is applied with `::/1` and `8000::/1`, so IPv6 traffic does not leak around the tether through Wi-Fi.
 
 ### DNS
 
 DNS was the subtle part. A first version registered a *supplemental* resolver in SystemConfiguration, which worked while Wi-Fi was on — but with Wi-Fi off, macOS had no *default* resolver, and names did not resolve.
 
 The fix is to describe the tether as a **network service**, like VPN clients do, by writing `State:/Network/Service/rndis-tether/IPv4` (address, router, interface) and `.../DNS` (the phone's DNS server) with `scutil`. macOS then elects it as the primary service when nothing else has a route, and uses its DNS. Both entries are removed on exit.
+
+Once an IPv6 address exists, a third entry, `.../IPv6` (address, prefix length, the router's link-local address, interface), is added. It is not cosmetic: without it, macOS only sends `A` queries through the tether's resolver, so IPv6-only host names do not resolve (`scutil --dns` shows "Request A records" only). With it, the resolver also shows "Request AAAA records".
 
 ## 6. Running as a service
 
@@ -117,7 +128,7 @@ If the status file is older than 20 seconds, the icon shows "service stopped".
 
 - **Throughput**: packets cross the kernel/userspace boundary and are copied; a native driver would be somewhat faster. On a Galaxy S24 Ultra, about 42 Mbit/s was measured, probably limited by the mobile network rather than the driver.
 - **Always-on service**: if the process stops, the network disappears (it restarts automatically under launchd).
-- **IPv4 only**.
+- **IPv6 depends on the phone**: it needs a Router Advertisement with a `/64` prefix (validated on a Galaxy S24 Ultra, whose mobile network provides IPv6). Without one, nothing IPv6 is configured and the tether stays IPv4-only. IPv6 DNS servers announced by the router (RDNSS) are not used; names are resolved through the phone's IPv4 DNS server, which also answers `AAAA` queries. No speed difference between IPv4 and IPv6 was measurable in tests; the mobile network dominates.
 - **Tested on one phone** (Galaxy S24 Ultra, Android 16, One UI 8). Phones with different RNDIS quirks may need changes.
 - **All traffic via the phone** while connected with `-r`, even if Wi-Fi is on — this uses mobile data.
 - **Security**: the service runs as root. It only processes data from the USB device you plug in and from the tether, and it passes values read from the phone to external commands only after formatting them as numeric IP addresses.
@@ -131,5 +142,6 @@ If the status file is older than 20 seconds, the icon shows "service stopped".
 | USB data path | `send_frame`, `rx_parse`, `rx_thread`, `tx_thread`, `ctrl_thread` |
 | Ethernet ↔ IP | `rx_frame`, `tx_thread` |
 | DHCP / ARP | `build_dhcp`, `dhcp_parse`, `dhcp_acquire`, `handle_arp` |
+| IPv6 (NDP, RA, SLAAC) | `icmp6_csum`, `build_na`, `parse_ra`, `build_rs`, `handle_ipv6`, `configure_ipv6` |
 | `utun`, routes, DNS | `utun_open`, `configure_iface`, `dns_apply`, `unconfigure_iface` |
 | Service control | `is_disabled`, `set_status`, `status_tick`, `adb_enable`, `session`, `main` |
