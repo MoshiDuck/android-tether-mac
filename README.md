@@ -80,6 +80,7 @@ sudo ./rndis-tether -v -r -w -a
 | `-V`, `--version` | Print the version |
 | `--diagnose` | Print a report for bug reports (no `sudo`; MAC addresses, public IPs and serial numbers are masked) |
 | `-U user` | User to run `adb` as (default `$SUDO_USER`; set by the LaunchDaemon) |
+| `-S serial` | Serial number of the phone for `adb` when several devices are connected (`adb devices` lists them) |
 | `-d vid:pid` | Target a specific device (hex) |
 | `-v` | Verbose logs |
 

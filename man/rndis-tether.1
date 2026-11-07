@@ -5,6 +5,7 @@ rndis-tether \- USB tethering from Android phones on macOS
 .B rndis-tether
 [\fB\-rwa4v\fR]
 [\fB\-U\fR \fIuser\fR]
+[\fB\-S\fR \fIserial\fR]
 [\fB\-W\fR \fIuser\fR]
 [\fB\-d\fR \fIvid\fR:\fIpid\fR]
 .br
@@ -71,6 +72,13 @@ User that runs
 Defaults to
 .IR SUDO_USER ;
 required when started by launchd.
+.TP
+.BI \-S " serial"
+Serial number of the phone to switch with
+.BR adb ,
+when several devices are connected
+.RB ( "adb devices"
+lists them). Without it, the phone is chosen only if exactly one device is ready; otherwise the problem is written to the log.
 .TP
 .BI \-W " user"
 Unprivileged user of the worker process. Defaults to

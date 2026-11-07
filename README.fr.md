@@ -48,6 +48,7 @@ sudo ./rndis-tether -v -r -w -a
 - `-V`, `--version` affiche la version
 - `--diagnose` affiche un rapport à joindre à un ticket (sans `sudo` ; adresses MAC, IP publiques et numéros de série masqués)
 - `-U user` utilisateur pour `adb` (défaut `$SUDO_USER`)
+- `-S série` numéro de série du téléphone pour `adb` quand plusieurs appareils sont branchés (`adb devices` les liste)
 - `-d vid:pid` cible un appareil précis ; `-v` logs détaillés
 
 Journal du service : `/var/log/rndis-tether.log`.
