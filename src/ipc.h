@@ -17,6 +17,7 @@ enum ipc_type {
     IPC_REQ_CONFIG6,        /* adresse (16) + routeur link-local (16) */
     IPC_REQ_STATUS,         /* texte d'état (voir policy_check_status) */
     IPC_REQ_ADB,            /* active le Modem USB via adb (exécuté par le superviseur) */
+    IPC_REQ_DECONFIG6,      /* le téléphone n'a plus d'IPv6 : retire adresse et routes, remet le blocage (sans données) */
     IPC_REPLY = 100         /* superviseur -> worker ; status 0 = accepté */
 };
 

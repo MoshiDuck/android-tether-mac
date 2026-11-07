@@ -5,6 +5,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Fixed
+- **IPv6 lost during a session.** If the phone stopped providing IPv6 after the session had started (for example because its internet moved to Wi-Fi), the Mac kept the old address and routes: IPv6 traffic then waited for a timeout instead of failing fast, and the leak guard did not come back. The worker now follows the router lifetime and the withdrawal of the prefix announced by the phone; when the IPv6 is gone, the supervisor removes the address, the service and the routes and puts the leak guard back (new request `DECONFIG6`, validated like the others). Router solicitations continue every 30 s while there is no IPv6, so it is picked up again when it returns.
+- A router advertisement with a router lifetime of 0 (not a default router) is no longer used to configure IPv6.
+
 ### Added
 - **`rndis-tether --diagnose`**: a report for bug reports, with no `sudo` and no changes to the system. It shows the service (supervisor and worker), the USB devices with a network, ADB or MTP interface, the ADB state, the IPv4 and IPv6 routes of the tether, the DNS resolvers, the end of the log and a plain-language diagnosis (cable, tethering not enabled, service stopped, disabled from the menu, IPv6 blocked by the leak guard…). MAC addresses are cut after the vendor part, public IPv4 and global IPv6 addresses are masked and ADB serial numbers are not shown. The bug report form now asks for it.
 

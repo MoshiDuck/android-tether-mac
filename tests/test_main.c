@@ -452,9 +452,21 @@ static void test_parse_ra(void) {
     put_prefix_opt(opts, 48, 0xC0, 3600);                                  /* pas un /64 */
     n = make_ra(f, opts, 32);
     CHECK(parse_ra(f, n, &r) == 0 && !r.have_prefix);
-    put_prefix_opt(opts, 64, 0xC0, 0);                                     /* durée de validité nulle */
+    put_prefix_opt(opts, 64, 0xC0, 0);                                     /* durée de validité nulle : préfixe retiré */
     n = make_ra(f, opts, 32);
-    CHECK(parse_ra(f, n, &r) == 0 && !r.have_prefix);
+    CHECK(parse_ra(f, n, &r) == 0 && !r.have_prefix && r.gone);
+    CHECK(!memcmp(r.gone_prefix, (uint8_t[]){0x26, 0, 0x03, 0x83, 0x0a, 0x44, 0x4d, 0x02}, 8));
+    put_prefix_opt(opts, 64, 0x80, 0);                                     /* retrait sans drapeau A : ignoré */
+    n = make_ra(f, opts, 32);
+    CHECK(parse_ra(f, n, &r) == 0 && !r.gone);
+    put_prefix_opt(opts, 48, 0xC0, 0);                                     /* retrait d'un préfixe qui n'est pas un /64 : ignoré */
+    n = make_ra(f, opts, 32);
+    CHECK(parse_ra(f, n, &r) == 0 && !r.gone);
+    put_prefix_opt(opts, 64, 0xC0, 3600);                                  /* un préfixe valable et un retrait dans la même RA */
+    put_prefix_opt(opts + 32, 64, 0xC0, 0); opts[32 + 16] = 0x20; opts[32 + 17] = 0x01;
+    n = make_ra(f, opts, 64);
+    CHECK(parse_ra(f, n, &r) == 0 && r.have_prefix && r.gone && r.gone_prefix[0] == 0x20);
+    put_prefix_opt(opts, 64, 0xC0, 3600);
     put_prefix_opt(opts, 64, 0xC0, 3600); opts[16] = 0xfe; opts[17] = 0x80; /* préfixe link-local */
     n = make_ra(f, opts, 32);
     CHECK(parse_ra(f, n, &r) == 0 && !r.have_prefix);
@@ -515,6 +527,76 @@ static void test_handle_ipv6(void) {
     close(utun_fd);
     utun_fd = -1;
     CHECK(1);
+}
+
+/* Cycle de vie de l'IPv6 obtenu : prise en compte, prolongation, retrait annoncé, expiration. */
+static void set_router_lifetime(uint8_t *f, uint16_t secs) { putbe16(f + 14 + 40 + 6, secs); }
+
+static void ra_at(const uint8_t *f, int n, int64_t now) {
+    struct ra r;
+    CHECK(parse_ra(f, n, &r) == 0);
+    ra_apply(&r, now);
+}
+
+static void test_ra_lifecycle(void) {
+    uint8_t f[300], opts[64];
+    put_prefix_opt(opts, 64, 0xC0, 3600);
+    int n = make_ra(f, opts, 32);
+    v6_claimed = v6_pending = v6_withdraw = 0; v6_expire = 0;
+
+    set_router_lifetime(f, 0);                                              /* pas un routeur par défaut : on ne s'en sert pas */
+    ra_at(f, n, 1000);
+    CHECK(!v6_claimed && !v6_pending && !v6_lost(1000));
+    set_router_lifetime(f, 1800);
+    CHECK(!v6_lost(5000));                                                  /* rien d'obtenu : rien à perdre */
+
+    ra_at(f, n, 1000);                                                      /* prise en compte */
+    CHECK(v6_claimed && v6_pending && v6_expire == 2800);
+    CHECK(!v6_lost(99999));                                                 /* tant que la configuration n'est pas faite */
+    v6_pending = 0;
+    CHECK(!v6_lost(2800) && v6_lost(2801));                                 /* expirée sans nouvelle RA */
+
+    ra_at(f, n, 2000);                                                      /* chaque RA normale repousse l'échéance */
+    CHECK(v6_expire == 3800 && !v6_lost(3800) && !v6_withdraw);
+    set_router_lifetime(f, 600);
+    ra_at(f, n, 2100);
+    CHECK(v6_expire == 2700);                                               /* la nouvelle durée remplace l'ancienne */
+    set_router_lifetime(f, 1800);
+
+    uint8_t other[300];                                                     /* un autre routeur ne retire rien */
+    memcpy(other, f, n);
+    other[14 + 8 + 15] ^= 0xff;
+    set_router_lifetime(other, 0);
+    ra_at(other, n, 2200);
+    CHECK(!v6_withdraw && v6_expire == 2700);
+    set_router_lifetime(other, 1800);
+    ra_at(other, n, 2200);
+    CHECK(v6_expire == 2700);                                               /* et ne repousse pas non plus l'échéance */
+
+    set_router_lifetime(f, 0);                                              /* notre routeur annonce qu'il part */
+    ra_at(f, n, 2300);
+    CHECK(v6_withdraw == 1 && v6_lost(2300));
+    set_router_lifetime(f, 1800);
+
+    v6_withdraw = 0;                                                        /* retrait de notre préfixe */
+    uint8_t gone[64];
+    put_prefix_opt(gone, 64, 0xC0, 0);
+    n = make_ra(f, gone, 32);
+    ra_at(f, n, 2400);
+    CHECK(v6_withdraw == 1);
+    v6_withdraw = 0;
+    gone[16] = 0x20;                                                        /* retrait d'un autre préfixe : on garde le nôtre */
+    n = make_ra(f, gone, 32);
+    ra_at(f, n, 2500);
+    CHECK(v6_withdraw == 0);
+
+    /* après le retrait, une RA avec préfixe réinstalle tout avec une nouvelle adresse */
+    v6_claimed = 0; v6_expire = 0; v6_pending = 0; v6_withdraw = 1;
+    put_prefix_opt(opts, 64, 0xC0, 3600);
+    n = make_ra(f, opts, 32);
+    ra_at(f, n, 4000);
+    CHECK(v6_claimed && v6_pending && !v6_withdraw && v6_expire == 5800);
+    v6_claimed = v6_pending = v6_withdraw = 0; v6_expire = 0;
 }
 
 /* À la fin d'une session, le bail n'est rendu que s'il est encore valable ; jamais deux fois. */
@@ -581,6 +663,7 @@ int main(void) {
     test_build_rs();
     test_parse_ra();
     test_handle_ipv6();
+    test_ra_lifecycle();
     test_renew_ack();
     test_release_lease();
     run_dhcp_tests();
