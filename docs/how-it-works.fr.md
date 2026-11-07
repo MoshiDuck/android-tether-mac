@@ -4,7 +4,7 @@
 
 TetherMac donne accès à Internet à un Mac via le partage de connexion USB d'un téléphone Android, **sans aucune extension noyau**. Cette page explique le problème, la méthode et chaque pièce, pour pouvoir auditer, déboguer ou étendre le projet.
 
-Sources : [`main.c`](../main.c) (le driver, ~700 lignes de C) et [`menubar/RNDISTether.swift`](../menubar/RNDISTether.swift) (l'icône de barre de menus).
+Sources : [`src/`](../src) (le driver en C : `main.c`, `dhcp.c`, `policy.c`, `ipc.c`) et [`menubar/RNDISTether.swift`](../menubar/RNDISTether.swift) (l'icône de barre de menus).
 
 ## 1. Le problème
 
@@ -75,7 +75,7 @@ Une interface `utun` ne transporte que des **paquets IP**, chacun précédé de 
 
 Comme il n'y a pas de vraie carte réseau, le driver joue aussi les rôles de sa pile réseau :
 
-- **Client DHCP** : envoie `DISCOVER`, prend l'`OFFER`, envoie `REQUEST`, reçoit l'`ACK`, en trames Ethernet/IP/UDP brutes avec le drapeau broadcast, puisqu'on n'a pas encore d'adresse. Il lit adresse, masque, routeur, DNS et durée du bail. Le bail est renouvelé à la moitié de sa durée par un nouveau `REQUEST`.
+- **Client DHCP** (RFC 2131, `src/dhcp.c`) : envoie `DISCOVER`, prend l'`OFFER`, envoie `REQUEST`, reçoit l'`ACK`, en trames Ethernet/IP/UDP brutes avec le drapeau broadcast, puisqu'on n'a pas encore d'adresse. Il lit adresse, masque, routeur, DNS, durée du bail et les T1/T2 du serveur. Le bail suit ensuite la norme : à **T1** (option 58, sinon 50 % du bail) une requête `REQUEST` en **unicast** au serveur avec notre adresse dans `ciaddr` et sans les options 50/54 ; sans réponse, elle est retransmise selon le délai de la norme ; à **T2** (option 59, sinon 87,5 %) elle devient une requête en **broadcast** ; si le bail expire, ou si le serveur répond `NAK` ou avec une autre adresse, la session est relancée de zéro. Toute la machine à états est pilotée par une horloge injectée et testée sans attendre.
 - **ARP** : répond à « qui a notre IP ? » venant du téléphone, et apprend la MAC du téléphone à partir de l'ARP et du trafic IP.
 
 ### IPv6
@@ -124,6 +124,29 @@ Dès qu'une adresse IPv6 existe, une troisième entrée, `.../IPv6` (adresse, lo
 
 Si le fichier d'état a plus de 20 secondes, l'icône affiche « service arrêté ».
 
+### Séparation des privilèges
+
+Le service est composé de deux processus, pour que le code qui lit des données hostiles ne tourne jamais en root :
+
+| | Superviseur | Worker |
+|---|---|---|
+| Tourne en | root | `nobody` (ou l'utilisateur donné avec `-W`) |
+| Fait | crée l'interface `utun` ; applique `ifconfig`/`route`/`scutil` après validation ; les retire à la fin ; écrit le fichier d'état ; lance `adb` | USB, RNDIS, DHCP, ARP, NDP, relais des paquets |
+| Lit des données hostiles | non | oui |
+
+Fonctionnement :
+
+1. Le superviseur (`supervisor_main`) résout l'utilisateur du worker, puis fait un `fork()`. L'enfant (`worker_main`) ferme tous les descripteurs hérités sauf le canal, appelle `setgroups`/`setgid`/`setuid`, et **vérifie qu'il ne peut plus redevenir root** (`setuid(0)` doit échouer) ; sinon il refuse de fonctionner.
+2. Les deux processus dialoguent par une `socketpair` avec des **messages de taille fixe** (`ipc.h`) et passage de descripteur : le superviseur crée l'interface `utun` et en transmet le descripteur au worker, qui lit et écrit les paquets sans aucun privilège.
+3. Le worker ne peut faire que cinq demandes : créer l'interface, appliquer une configuration IPv4, une configuration IPv6, signaler un état, et activer le tethering via `adb`. **Le superviseur valide chaque valeur** (`policy.c`) : la passerelle doit être dans le sous-réseau attribué, les adresses unicast et routables, le texte d'état limité à quelques formes exactes, etc. Les commandes sont construites à partir de nombres validés, jamais de texte envoyé par le worker.
+4. Le superviseur retient ce qu'il a appliqué (routes, DNS, entrées du service), donc le nettoyage ne dépend jamais du worker. Un plantage, un débranchement ou un message mal formé termine ce worker ; le superviseur nettoie et en démarre un neuf. **Il y a un worker par session** : aucun état ne survit d'une session à l'autre.
+
+Ce que cela apporte, et ses limites :
+
+- Un bogue dans le code USB, RNDIS, DHCP ou paquets (celui qui analyse les données du téléphone et du réseau) n'est plus une faille root : l'attaquant obtient l'utilisateur `nobody`, pas root.
+- Un worker compromis peut encore envoyer du trafic dans le tunnel et demander une configuration *valide* (ce qu'un téléphone malveillant avec un serveur DHCP peut déjà faire). Il ne peut pas exécuter de commandes, écrire des fichiers en root ni changer des réglages système arbitraires.
+- Le worker n'est pas encore confiné par un bac à sable (il pourrait ouvrir des fichiers lisibles par `nobody` ou faire des connexions réseau). Un profil de sandbox macOS figure dans la [feuille de route](../ROADMAP.fr.md).
+
 ## 7. Compromis et limites
 
 - **Débit** : les paquets traversent la frontière noyau/espace utilisateur et sont copiés ; un pilote natif serait un peu plus rapide. Sur un Galaxy S24 Ultra, environ 42 Mbit/s ont été mesurés, probablement limités par le réseau mobile plutôt que par le driver.
@@ -131,17 +154,20 @@ Si le fichier d'état a plus de 20 secondes, l'icône affiche « service arrêt�
 - **IPv6 dépend du téléphone** : il faut une annonce de routeur avec un préfixe `/64` (validé sur un Galaxy S24 Ultra, dont le réseau mobile fournit l'IPv6). Sans elle, rien n'est configuré en IPv6 et le tethering reste en IPv4 seul. Les serveurs DNS IPv6 annoncés par le routeur (RDNSS) ne sont pas utilisés : les noms sont résolus par le DNS IPv4 du téléphone, qui répond aussi aux requêtes `AAAA`. Aucune différence de vitesse entre IPv4 et IPv6 n'a été mesurable ; le réseau mobile domine.
 - **Testé sur un seul téléphone** (Galaxy S24 Ultra, Android 16, One UI 8). Des téléphones aux particularités RNDIS différentes peuvent demander des adaptations.
 - **Tout le trafic passe par le téléphone** pendant la connexion avec `-r`, même si le Wi-Fi est allumé : ça consomme des données mobiles.
-- **Sécurité** : le service tourne en root. Il ne traite que les données de l'appareil USB branché et du tethering, et ne passe des valeurs lues depuis le téléphone à des commandes externes qu'après les avoir mises sous forme d'adresses IP numériques.
+- **Sécurité** : seul un petit superviseur tourne en root ; tout ce qui analyse des données du téléphone ou du réseau tourne dans un worker sans privilèges (voir *Séparation des privilèges*). Le superviseur ne transmet des valeurs à des commandes externes qu'après les avoir validées et mises sous forme d'adresses numériques.
 
 ## 8. Où regarder dans le code
 
-| Sujet | Fonction(s) de `main.c` |
+| Sujet | Fonction(s) (`src/main.c` sauf mention) |
 |-------|-------------------------|
 | Détection de l'appareil | `find_device`, `is_rndis_ctrl` |
 | Négociation RNDIS | `rndis_cmd`, `rndis_init`, `rndis_halt`, `answer_keepalive` |
 | Flux de données USB | `send_frame`, `rx_parse`, `rx_thread`, `tx_thread`, `ctrl_thread` |
 | Ethernet ↔ IP | `rx_frame`, `tx_thread` |
-| DHCP / ARP | `build_dhcp`, `dhcp_parse`, `dhcp_acquire`, `handle_arp` |
+| DHCP / ARP | `dhcp_build`, `dhcp_build_renew`, `dhcp_parse` (`src/dhcp.c`) ; `dhcp_acquire`, `handle_arp` |
+| Cycle de vie du bail (T1, T2, expiration) | `dhcp_client_bound`, `dhcp_client_tick`, `dhcp_client_input` (`src/dhcp.c`) |
 | IPv6 (NDP, RA, SLAAC) | `icmp6_csum`, `build_na`, `parse_ra`, `build_rs`, `handle_ipv6`, `configure_ipv6` |
 | `utun`, routes, DNS | `utun_open`, `configure_iface`, `dns_apply`, `unconfigure_iface` |
 | Contrôle du service | `is_disabled`, `set_status`, `status_tick`, `adb_enable`, `session`, `main` |
+| Séparation des privilèges (côté root) | `supervisor_main`, `run_worker_once`, `handle_request` |
+| Validation des demandes / IPC | `policy_check_v4`, `policy_check_v6`, `policy_check_status` (`src/policy.c`) ; `ipc_send`, `ipc_recv` (`src/ipc.c`) ; côté worker : `worker_main`, `drop_privileges`, `ipc_call` |

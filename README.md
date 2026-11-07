@@ -16,10 +16,12 @@ macOS has no built-in RNDIS driver, and kext-based drivers such as HoRNDIS no lo
 ## Features
 
 - Pure userspace (libusb + `utun`), no kext, no DriverKit entitlement
+- **Privilege separation**: only a tiny supervisor runs as root; everything that parses data from the phone or the network runs in an unprivileged worker (`nobody`), and the supervisor validates every request it receives
 - Runs as a background service from boot; connects as soon as a phone is plugged in
 - Menu bar icon: status, enable/disable
 - Optionally switches the phone into USB-tethering mode through `adb`
-- Applies the phone's DNS (so you can turn Wi-Fi off), renews the DHCP lease, reconnects after unplugging
+- Applies the phone's DNS (so you can turn Wi-Fi off), reconnects after unplugging
+- RFC 2131 DHCP client: unicast renewal at T1, broadcast rebind at T2, retransmissions, expiry and NAK handling
 - IPv4 **and IPv6** (when the phone's network provides it): IPv6 traffic goes through the phone too, instead of leaking out through Wi-Fi
 
 ## Requirements
@@ -72,6 +74,7 @@ sudo ./rndis-tether -v -r -w -a
 | `-w` | Wait for the phone and reconnect after unplugging |
 | `-a` | Enable tethering on the phone through `adb` (needs USB debugging) |
 | `-4` | IPv4 only (turn the IPv6 relay off) |
+| `-W user` | Unprivileged user for the worker process (default `nobody`) |
 | `-U user` | User to run `adb` as (default `$SUDO_USER`; set by the LaunchDaemon) |
 | `-d vid:pid` | Target a specific device (hex) |
 | `-v` | Verbose logs |
@@ -87,6 +90,7 @@ Log file when installed as a service: `/var/log/rndis-tether.log`.
 3. DHCP client over raw Ethernet frames, then ARP responder.
 4. IPv4 and IPv6 packets are copied between the phone and a `utun` interface; Ethernet headers are added/stripped in userspace. IPv6 uses a router solicitation, SLAAC and neighbor advertisements.
 5. The menu bar app talks to the root service through two files in `/Users/Shared` (`rndis-tether.disabled`, `rndis-tether.status`).
+6. The service is split in two processes — a root supervisor and an unprivileged worker that does all the parsing — see *Privilege separation* in [docs/how-it-works.md](docs/how-it-works.md).
 
 ## Compatibility
 
@@ -100,22 +104,25 @@ This has only been tested on a **Samsung Galaxy S24 Ultra**. Other phones should
 ## Limitations
 
 - IPv6 needs the phone to advertise a `/64` prefix (it did on the tested phone); otherwise the tether stays IPv4-only. IPv6-only DNS servers announced by the router are not used. Use `-4` to turn IPv6 off. IPv6 is not faster than IPv4 here — the mobile network dominates
-- DHCP lease renewal (every half lease, ~30 min) has not been observed over a full lease yet
-- If the service is killed with `kill -9`, the routes `0.0.0.0/1` and `128.0.0.0/1` may remain: `sudo route -n delete -net 0.0.0.0/1` and `128.0.0.0/1`
+- DHCP renewal was observed on the tested phone with the earlier broadcast form; the RFC 2131 forms (unicast at T1, broadcast at T2, expiry) are covered by tests with a simulated clock and still need a live check on a real lease
+- If the supervisor is killed with `kill -9`, the routes `0.0.0.0/1` and `128.0.0.0/1` may remain: `sudo route -n delete -net 0.0.0.0/1` and `128.0.0.0/1`
 
 ## Development
 
 ```sh
-make CFLAGS="-O2 -Wall -Wextra -Werror"   # build the driver, warnings are errors
-make test                                  # unit + fuzz tests under ASan/UBSan, no phone or root needed
-menubar/build.sh                           # build the menu bar app
+make strict        # all warnings are errors (-Wshadow, -Wformat=2, -Wcast-qual, …)
+make               # build the driver
+make test          # unit, state-machine, IPC, supervisor and fuzz tests under ASan/UBSan — no phone or root needed
+make analyze       # clang static analyzer
+make coverage      # line coverage report (CI enforces thresholds per module)
+menubar/build.sh   # build the menu bar app
 ```
 
-The service runs as root and parses data coming from a USB device, so the parsers are fuzzed in the test suite (see [SECURITY.md](SECURITY.md)). CI runs all of the above on every push.
+The parsers handle data from the phone and the network, so they are fuzzed in the test suite and run in an unprivileged process (see [SECURITY.md](SECURITY.md)). CI runs all of the above on every push, on two macOS versions. Where the project is heading: [ROADMAP.md](ROADMAP.md).
 
 ## Contributing
 
-Pull requests are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) and the [Code of Conduct](CODE_OF_CONDUCT.md). Phone reports and bug reports with `-v` logs and your phone's `vid:pid` are especially useful. Changes are listed in [CHANGELOG.md](CHANGELOG.md).
+Pull requests are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md), the [Code of Conduct](CODE_OF_CONDUCT.md) and the [roadmap](ROADMAP.md). Phone reports and bug reports with `-v` logs and your phone's `vid:pid` are especially useful. Changes are listed in [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 

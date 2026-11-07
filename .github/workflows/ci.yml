@@ -65,7 +65,7 @@ jobs:
       - name: Coverage report and thresholds
         run: |
           make coverage | tee coverage.txt
-          scripts/check-coverage.sh coverage.txt dhcp.c=95 TOTAL=35
+          scripts/check-coverage.sh coverage.txt dhcp.c=95 policy.c=95 ipc.c=95 TOTAL=50
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4

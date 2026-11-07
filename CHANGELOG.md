@@ -5,6 +5,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Security
+- **Privilege separation.** The root service is now a small *supervisor* plus an unprivileged *worker* (`nobody`, or `-W user`). The worker does all the USB, RNDIS, DHCP, NDP and packet parsing; it receives the `utun` interface by descriptor passing and can only ask the supervisor for five actions over a fixed-size channel. The supervisor validates every value (`policy.c`) before it runs `ifconfig`, `route`, `scutil` or `adb`, remembers what it applied so cleanup never depends on the worker, and starts a fresh worker for each session. A bug in the parsing code is no longer a root exploit.
+
+### Changed
+- **DHCP client follows RFC 2131.** Renewal is a *unicast* `REQUEST` with `ciaddr` and without options 50/54 at T1, then a *broadcast* `REQUEST` at T2; the server's T1/T2 (options 58/59) are honoured; retransmissions use the RFC back-off; a lease that expires, a `NAK`, or a different address restarts the session. Previously renewal was a broadcast in the "selecting" form, was never retried and ignored expiry.
+- Code split into modules under `src/` (`dhcp`, `policy`, `ipc`, `bytes`); `main.c` moved to `src/main.c`.
+- New option `-W user` (unprivileged worker user, default `nobody`). Log lines are tagged `[root]` / `[worker]`.
+
+### Added
+- Tests for the DHCP state machine with a simulated clock, the validation policy (accept/reject tables and a property test), the IPC channel (descriptor passing, closed peer, malformed and random input) and the supervisor itself (system commands are recorded instead of run). 1.3 million checks under ASan/UBSan.
+- `make strict` (extra warnings as errors), `make analyze` (clang static analyzer), `make coverage` with per-module thresholds enforced in CI; CI on macOS 14 and 15; `actionlint`.
+- Release workflow: on a `vX.Y.Z` tag it checks the changelog, builds and tests, creates the GitHub Release from the changelog, optionally updates the Homebrew formula, and verifies `brew install` on a clean runner. A CI job installs the tap formula with `--HEAD` on every push to `main`.
+- `ROADMAP.md` and `RELEASING.md`.
+
 ## [0.1.1] - 2026-11-06
 
 **Security release — users of 0.1.0 should upgrade** (`brew upgrade android-tether-mac && tethermac-install`).

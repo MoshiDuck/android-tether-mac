@@ -3,19 +3,19 @@ CFLAGS  ?= -O2 -Wall -Wextra
 override CFLAGS += $(shell pkg-config --cflags libusb-1.0)
 LDLIBS  += $(shell pkg-config --libs libusb-1.0) -lpthread
 
-SRC  = src/main.c src/dhcp.c
+SRC  = src/main.c src/dhcp.c src/policy.c src/ipc.c
 HDR  = $(wildcard src/*.h)
-TEST_SRC = tests/test_main.c tests/test_dhcp.c src/dhcp.c
+TEST_SRC = tests/test_main.c tests/test_dhcp.c tests/test_policy.c tests/test_ipc.c src/dhcp.c src/policy.c src/ipc.c
 
 # Avertissements stricts : utilisés par la CI (cible `strict`)
 STRICT_FLAGS = -O2 -Wall -Wextra -Wshadow -Wformat=2 -Wstrict-prototypes -Wpointer-arith -Wcast-qual \
                -Wwrite-strings -Wmissing-prototypes -Wnull-dereference -Werror
 
 # Tests unitaires + robustesse, compilés avec ASan/UBSan (aucun téléphone requis)
-TEST_FLAGS = -g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined -fno-sanitize-recover=undefined
+TEST_FLAGS = -g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined -fno-sanitize-recover=undefined -DRNDIS_TESTING
 
 # Couverture de code (LLVM source-based coverage)
-COV_FLAGS = -g -O0 -fprofile-instr-generate -fcoverage-mapping
+COV_FLAGS = -g -O0 -fprofile-instr-generate -fcoverage-mapping -DRNDIS_TESTING
 LLVM_COV      = $(shell xcrun --find llvm-cov 2>/dev/null || command -v llvm-cov)
 LLVM_PROFDATA = $(shell xcrun --find llvm-profdata 2>/dev/null || command -v llvm-profdata)
 
@@ -34,13 +34,13 @@ analyze: $(SRC) $(HDR)
 	  if [ -n "$$out" ]; then echo "$$out"; exit 1; fi; \
 	done
 
-tests/test_main: $(TEST_SRC) src/main.c $(HDR) tests/check.h
+tests/test_main: $(TEST_SRC) src/main.c $(HDR) tests/check.h tests/test_supervisor.h
 	$(CC) $(CFLAGS) $(TEST_FLAGS) -o $@ $(TEST_SRC) $(LDLIBS)
 
 test: tests/test_main
 	./tests/test_main
 
-tests/test_cov: $(TEST_SRC) src/main.c $(HDR) tests/check.h
+tests/test_cov: $(TEST_SRC) src/main.c $(HDR) tests/check.h tests/test_supervisor.h
 	$(CC) $(CFLAGS) $(COV_FLAGS) -o $@ $(TEST_SRC) $(LDLIBS)
 
 # Rapport de couverture ; scripts/check-coverage.sh vérifie les seuils des modules purs
