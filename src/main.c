@@ -90,6 +90,8 @@ static int v6_svc;                    /* service IPv6 déclaré dans SystemConfi
 static int v6_claimed;               /* une RA exploitable a déjà été prise en compte */
 static int v6_pending;                /* adresse prête, à configurer par le thread de contrôle */
 static int v6_routes;                 /* routes ::/1 et 8000::/1 installées */
+static int v6_blocked;                /* routes « reject » installées : l'IPv6 ne peut pas fuir par un autre réseau */
+static int allow_v6_leak;             /* -L : ne pas bloquer l'IPv6 hors tethering */
 static int utun_fd = -1;
 static char utun_name[IFNAMSIZ];
 static uint8_t my_mac[6], gw_mac[6];
@@ -570,6 +572,24 @@ static int build_rs(uint8_t *out) {
     return 14 + 40 + 16;
 }
 
+/* Avec -r, tant que le tethering n'a pas d'IPv6, on empêche l'IPv6 du Mac de fuir par un autre réseau (Wi-Fi...).
+ * Deux routes « reject » plus précises que la route par défaut font échouer aussitôt les destinations IPv6 hors-lien ;
+ * les applications se rabattent sur l'IPv4, qui passe par le téléphone. Les réseaux locaux (routes /64, plus précises)
+ * restent joignables. Idempotent. */
+static void block_ipv6(void) {
+    if (v6_blocked || !want_route || allow_v6_leak) return;
+    sh("/sbin/route -q -n add -inet6 -net ::/1 ::1 -reject");
+    sh("/sbin/route -q -n add -inet6 -net 8000::/1 ::1 -reject");
+    v6_blocked = 1;
+}
+
+static void unblock_ipv6(void) {
+    if (!v6_blocked) return;
+    sh("/sbin/route -q -n delete -inet6 -net ::/1 ::1");
+    sh("/sbin/route -q -n delete -inet6 -net 8000::/1 ::1");
+    v6_blocked = 0;
+}
+
 static void configure_ipv6(void) {
     char a[INET6_ADDRSTRLEN];
     inet_ntop(AF_INET6, v6_addr, a, sizeof a);
@@ -592,6 +612,7 @@ static void configure_ipv6(void) {
 }
 
 static void unconfigure_iface(void) {
+    unblock_ipv6();
     if (v6_svc) {
         scutil_run("remove State:/Network/Service/rndis-tether/IPv6\n");
         v6_svc = 0;
@@ -887,6 +908,7 @@ static void usage(const char *p) {
                     "  -W  utilisateur sans privilèges du worker (défaut: nobody)\n"
                     "  -4  IPv4 uniquement (désactive le relais IPv6)\n"
                     "  -O  accepter un sous-réseau du téléphone qui recouvre un réseau déjà utilisé\n"
+                    "  -L  avec -r, laisser l'IPv6 sortir par les autres réseaux quand le tethering n'en a pas\n"
                     "  -v  logs détaillés\n"
                     "  -d  cibler un appareil précis (hex), ex: 18d1:4ee3\n"
                     "  -V  afficher la version\n", p, p);
@@ -978,6 +1000,7 @@ static void handle_request(int sock, const struct ipc_msg *rq) {
         my_ip = ip; gw_ip = gw;
         configure_iface(&L);
         cfg4_done = 1;
+        block_ipv6();                                                /* en attendant l'IPv6 du tethering, s'il en vient */
         break;
     }
     case IPC_REQ_CONFIG6: {
@@ -986,6 +1009,7 @@ static void handle_request(int sock, const struct ipc_msg *rq) {
         if (e) { LOG("Configuration IPv6 refusée : %s", policy_strerror(e)); rp.status = (uint8_t)e; break; }
         memcpy(v6_addr, rq->data, 16);
         memcpy(v6_router, rq->data + 16, 16);
+        unblock_ipv6();                                              /* les vraies routes remplacent les routes « reject » */
         configure_ipv6();
         cfg6_done = 1;
         break;
@@ -1083,7 +1107,7 @@ static int run_worker_once(unsigned vid, unsigned pid, uid_t uid, gid_t gid) {
     }
     close(sv[1]);
     utun_fd = -1; cfg4_done = cfg6_done = 0; my_ip = gw_ip = 0;
-    v6_routes = v6_svc = 0;
+    v6_routes = v6_svc = v6_blocked = 0;
     struct rate_limit rl = {0, 0};
 
     for (;;) {
@@ -1128,6 +1152,10 @@ static int supervisor_main(unsigned vid, unsigned pid) {
     uid_t uid = pw->pw_uid;
     gid_t gid = pw->pw_gid;
     LOG("Superviseur %s démarré ; le worker tournera sans privilèges (utilisateur %s)", RNDIS_VERSION, worker_user);
+    if (want_route && !allow_v6_leak) {                              /* routes « reject » restées d'un arrêt brutal précédent */
+        sh("/sbin/route -q -n delete -inet6 -net ::/1 ::1");
+        sh("/sbin/route -q -n delete -inet6 -net 8000::/1 ::1");
+    }
     int rc = 0;
     while (!quit) {
         if (is_disabled()) { status_tick("disabled"); sleep(1); continue; }
@@ -1148,8 +1176,9 @@ int main(int argc, char **argv) {
     unsigned vid = 0, pid = 0;
     int opt;
     if (argc > 1 && !strcmp(argv[1], "--version")) { printf("rndis-tether %s\n", RNDIS_VERSION); return 0; }
-    while ((opt = getopt(argc, argv, "rwavd:U:W:4OVh")) != -1) {
+    while ((opt = getopt(argc, argv, "rwavd:U:W:4OLVh")) != -1) {
         switch (opt) {
+        case 'L': allow_v6_leak = 1; break;
         case 'O': allow_overlap = 1; break;
         case 'V': printf("rndis-tether %s\n", RNDIS_VERSION); return 0;
         case '4': ipv6_on = 0; break;

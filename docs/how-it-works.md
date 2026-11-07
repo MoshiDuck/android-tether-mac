@@ -94,7 +94,7 @@ After DHCP, the driver runs `ifconfig` to set the address on the `utun` interfac
 
 ### Routes (`-r`)
 
-Instead of replacing the default route, it adds two **more specific** routes, `0.0.0.0/1` and `128.0.0.0/1`, via the phone. Together they cover all of IPv4 and beat the default route, but the existing default route stays untouched. Removing the two routes restores everything. When an IPv6 address has been configured, the same trick is applied with `::/1` and `8000::/1`, so IPv6 traffic does not leak around the tether through Wi-Fi.
+Instead of replacing the default route, it adds two **more specific** routes, `0.0.0.0/1` and `128.0.0.0/1`, via the phone. Together they cover all of IPv4 and beat the default route, but the existing default route stays untouched. Removing the two routes restores everything. When an IPv6 address has been configured, the same trick is applied with `::/1` and `8000::/1`, so IPv6 traffic does not leak around the tether through Wi-Fi. If the tether has no IPv6 (Android does not delegate a prefix when the phone's own internet comes from Wi-Fi), the supervisor installs the same two routes as `reject` routes instead: IPv6 destinations outside the local networks fail immediately, so applications fall back to IPv4, which goes through the phone. Local IPv6 networks keep working because their routes are more specific. The `reject` routes are replaced by the real ones if the tether later gets IPv6, removed at the end of the session, and also cleaned up when the service starts. `-L` disables this.
 
 ### DNS
 

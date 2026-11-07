@@ -5,6 +5,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Security
+- **IPv6 leak guard.** With `-r`, when the tether provides no IPv6 (for example because the phone's own internet comes from Wi-Fi), the supervisor installs two `reject` routes (`::/1` and `8000::/1`) so that the Mac's IPv6 traffic cannot bypass the phone through another network; applications fall back to IPv4, which goes through the phone, and local IPv6 networks stay reachable. When the tether does get IPv6, the `reject` routes are replaced by the real routes. They are removed at the end of the session and when the service starts. `-L` restores the previous behaviour.
+
 ## [0.3.0] - 2026-11-06
 
 Hardening release: the subnet-overlap guard and the request rate limit tighten the supervisor, and the lease is now returned to the phone. Upgrade with `brew upgrade android-tether-mac && tethermac-install`.
