@@ -47,6 +47,10 @@
 #include "ipc.h"
 #include "policy.h"
 
+#ifndef RNDIS_VERSION
+#define RNDIS_VERSION "unknown"
+#endif
+
 /* ---------- RNDIS ---------- */
 #define RNDIS_PACKET_MSG        0x00000001u
 #define RNDIS_INIT_MSG          0x00000002u
@@ -854,7 +858,8 @@ static void adb_enable(void) {
 }
 
 static void usage(const char *p) {
-    fprintf(stderr, "Usage: sudo %s [-r] [-v] [-d vid:pid]\n"
+    fprintf(stderr, "Usage: sudo %s [-r] [-w] [-a] [-4] [-U user] [-W user] [-v] [-d vid:pid]\n"
+                    "       %s --version\n"
                     "  -r  route tout le trafic via le téléphone (routes 0/1 et 128/1, retirées à la sortie)\n"
                     "      (applique aussi le DNS du téléphone, retiré à la sortie)\n"
                     "  -w  attendre le téléphone et se reconnecter après un débranchement\n"
@@ -863,7 +868,8 @@ static void usage(const char *p) {
                     "  -W  utilisateur sans privilèges du worker (défaut: nobody)\n"
                     "  -4  IPv4 uniquement (désactive le relais IPv6)\n"
                     "  -v  logs détaillés\n"
-                    "  -d  cibler un appareil précis (hex), ex: 18d1:4ee3\n", p);
+                    "  -d  cibler un appareil précis (hex), ex: 18d1:4ee3\n"
+                    "  -V  afficher la version\n", p, p);
 }
 
 /* ---------- Superviseur (root) ---------- */
@@ -1041,7 +1047,7 @@ static int supervisor_main(unsigned vid, unsigned pid) {
     }
     uid_t uid = pw->pw_uid;
     gid_t gid = pw->pw_gid;
-    LOG("Superviseur démarré ; le worker tournera sans privilèges (utilisateur %s)", worker_user);
+    LOG("Superviseur %s démarré ; le worker tournera sans privilèges (utilisateur %s)", RNDIS_VERSION, worker_user);
     int rc = 0;
     while (!quit) {
         if (is_disabled()) { status_tick("disabled"); sleep(1); continue; }
@@ -1061,8 +1067,10 @@ static int supervisor_main(unsigned vid, unsigned pid) {
 int main(int argc, char **argv) {
     unsigned vid = 0, pid = 0;
     int opt;
-    while ((opt = getopt(argc, argv, "rwavd:U:W:4h")) != -1) {
+    if (argc > 1 && !strcmp(argv[1], "--version")) { printf("rndis-tether %s\n", RNDIS_VERSION); return 0; }
+    while ((opt = getopt(argc, argv, "rwavd:U:W:4Vh")) != -1) {
         switch (opt) {
+        case 'V': printf("rndis-tether %s\n", RNDIS_VERSION); return 0;
         case '4': ipv6_on = 0; break;
         case 'U': adb_user = optarg; break;
         case 'W': worker_user = optarg; break;

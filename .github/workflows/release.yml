@@ -26,6 +26,11 @@ jobs:
           version="${TAG#v}"
           grep -q "^## \[$version\]" CHANGELOG.md || { echo "CHANGELOG.md has no section for $version" >&2; exit 1; }
 
+      - name: Check that VERSION matches the tag
+        run: |
+          version="${TAG#v}"
+          test "$(cat VERSION)" = "$version" || { echo "VERSION contains $(cat VERSION), the tag is $version" >&2; exit 1; }
+
       - name: Install dependencies
         run: brew install libusb pkgconf
 
