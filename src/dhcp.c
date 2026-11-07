@@ -29,9 +29,9 @@ static int finish_frame(uint8_t *f, int blen, uint32_t src_ip, uint32_t dst_ip) 
     return 14 + iplen;
 }
 
-/* Liste des paramètres demandés : masque, routeur, DNS, durée du bail, T1, T2. */
+/* Liste des paramètres demandés : masque, routeur, DNS, MTU, durée du bail, T1, T2. */
 static uint8_t *put_param_request(uint8_t *o) {
-    *o++ = 55; *o++ = 6; *o++ = 1; *o++ = 3; *o++ = 6; *o++ = 51; *o++ = 58; *o++ = 59;
+    *o++ = 55; *o++ = 7; *o++ = 1; *o++ = 3; *o++ = 6; *o++ = 26; *o++ = 51; *o++ = 58; *o++ = 59;
     return o;
 }
 
@@ -117,6 +117,7 @@ int dhcp_parse(const uint8_t *f, int len, const uint8_t mac[6], uint32_t xid, st
         else if (code == 51 && l >= 4) L->secs = be32(o + 2);
         else if (code == 58 && l >= 4) L->t1 = be32(o + 2);
         else if (code == 59 && l >= 4) L->t2 = be32(o + 2);
+        else if (code == 26 && l >= 2) L->mtu = (uint16_t)(o[2] << 8 | o[3]);
         else if (code == 54 && l >= 4) memcpy(&L->srv, o + 2, 4);
         o += 2 + l;
     }

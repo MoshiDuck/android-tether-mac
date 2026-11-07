@@ -118,6 +118,26 @@ static void test_parse_t1_t2(void) {
     CHECK(dhcp_parse(f, n, MAC, 78, &L) == 0 && L.t1 == 0 && L.t2 == 0);
 }
 
+static void test_parse_mtu(void) {
+    uint8_t f[700];
+    struct lease L;
+    const uint8_t with_mtu[] = {26, 2, 0x05, 0x78};                              /* 1400 */
+    int n = make_reply(f, 5, 90, with_mtu, sizeof with_mtu);
+    CHECK(dhcp_parse(f, n, MAC, 90, &L) == 0 && L.mtu == 1400);
+    n = make_reply(f, 5, 91, (const uint8_t *)"", 0);
+    CHECK(dhcp_parse(f, n, MAC, 91, &L) == 0 && L.mtu == 0);                      /* absente */
+    const uint8_t short_mtu[] = {26, 1, 0x05};                                    /* option trop courte : ignorée */
+    n = make_reply(f, 5, 92, short_mtu, sizeof short_mtu);
+    CHECK(dhcp_parse(f, n, MAC, 92, &L) == 0 && L.mtu == 0);
+    const uint8_t zero_mtu[] = {26, 2, 0, 0};
+    n = make_reply(f, 5, 93, zero_mtu, sizeof zero_mtu);
+    CHECK(dhcp_parse(f, n, MAC, 93, &L) == 0 && L.mtu == 0);
+
+    n = dhcp_build(f, MAC, 1, 94, 0, 0);                                         /* on demande l'option 26 au serveur */
+    const uint8_t *pr = opt(f, n, 55);
+    CHECK(pr && memchr(pr + 2, 26, pr[1]) && memchr(pr + 2, 1, pr[1]) && memchr(pr + 2, 3, pr[1]));
+}
+
 /* ---------- cycle de vie du bail ---------- */
 static struct lease mklease(uint32_t secs, uint32_t t1, uint32_t t2) {
     struct lease L;
@@ -277,6 +297,7 @@ void run_dhcp_tests(void) {
     test_renew_frames();
     test_release_frame();
     test_parse_t1_t2();
+    test_parse_mtu();
     test_timers();
     test_renew_cycle();
     test_retransmissions();

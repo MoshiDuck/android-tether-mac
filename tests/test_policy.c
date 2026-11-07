@@ -249,7 +249,28 @@ static uint32_t sh_rand_mask(void) {
     return sh >= 32 ? 0 : 0xffffffffu << sh;
 }
 
+static void test_mtu(void) {
+    CHECK(policy_check_mtu(1500, 0) == OK && policy_check_mtu(1500, 1) == OK);
+    CHECK(policy_check_mtu(576, 0) == OK && policy_check_mtu(575, 0) == POLICY_BAD_MTU);
+    CHECK(policy_check_mtu(1280, 1) == OK && policy_check_mtu(1279, 1) == POLICY_BAD_MTU);
+    CHECK(policy_check_mtu(1501, 0) == POLICY_BAD_MTU && policy_check_mtu(65535, 1) == POLICY_BAD_MTU);
+    CHECK(policy_check_mtu(0, 0) == POLICY_BAD_MTU && policy_check_mtu(0, 1) == POLICY_BAD_MTU);
+    CHECK(policy_check_mtu(1400, 0) == OK && policy_check_mtu(1400, 1) == OK);
+
+    CHECK(policy_mtu_from_peer(0, 576) == 0);                                  /* absente */
+    CHECK(policy_mtu_from_peer(575, 576) == 0 && policy_mtu_from_peer(576, 576) == 576);
+    CHECK(policy_mtu_from_peer(1400, 576) == 1400);
+    CHECK(policy_mtu_from_peer(9000, 576) == POLICY_MTU_MAX);                  /* plafonné : les tampons ne portent pas plus */
+    CHECK(policy_mtu_from_peer(1279, 1280) == 0 && policy_mtu_from_peer(1280, 1280) == 1280);
+    for (unsigned v = 0; v < 70000; v += 7) {                                  /* jamais hors de [min, max] ou 0 */
+        unsigned m = policy_mtu_from_peer(v, 576);
+        CHECK(m == 0 || (m >= 576 && m <= POLICY_MTU_MAX));
+    }
+    CHECK(strlen(policy_strerror(POLICY_BAD_MTU)) > 0 && strcmp(policy_strerror(POLICY_BAD_MTU), policy_strerror(999)) != 0);
+}
+
 void run_policy_tests(void) {
+    test_mtu();
     test_overlap();
     test_overlap_property();
     test_rate_limit();
