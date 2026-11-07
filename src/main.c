@@ -604,7 +604,8 @@ static int build_na(uint8_t *out, const uint8_t *f, int len) {
 }
 
 struct ra { int have_prefix; uint8_t prefix[16]; uint8_t plen; uint16_t router_lifetime; uint8_t router[16];
-            int gone; uint8_t gone_prefix[8]; uint16_t mtu; };      /* gone : un /64 auto-configurable annoncé avec une durée de validité nulle */
+            int gone; uint8_t gone_prefix[8]; uint16_t mtu;
+            int nprefixes; uint8_t prefixes[4][8]; };   /* tous les /64 utilisables annoncés (au plus 4) */      /* gone : un /64 auto-configurable annoncé avec une durée de validité nulle */
 
 /* Analyse une annonce de routeur (RA). Tout vient du réseau : bornes vérifiées à chaque option.
  * Retourne 0 si c'est une RA valide (have_prefix indique si un préfixe /64 auto-configurable y figure). */
@@ -633,6 +634,7 @@ static int parse_ra(const uint8_t *f, int len, struct ra *r) {
             int onlink_auto = (o[3] & 0x40) != 0;                    /* drapeau A : SLAAC autorisé */
             int link_local = p[0] == 0xfe && (p[1] & 0xc0) == 0x80;
             int usable = o[2] == 64 && onlink_auto && p[0] != 0xff && !link_local && memcmp(p, zero8, 8);
+            if (usable && be32(o + 4) > 0 && r->nprefixes < 4) memcpy(r->prefixes[r->nprefixes++], p, 8);
             if (usable && be32(o + 4) > 0 && !r->have_prefix) {
                 memcpy(r->prefix, p, 16);
                 r->plen = o[2];
@@ -780,8 +782,11 @@ static void ra_apply(const struct ra *r, int64_t now) {
         return;
     }
     if (memcmp(r->router, v6_router, 16)) return;                    /* une RA d'un autre routeur ne nous concerne pas */
-    if (r->router_lifetime == 0 || (r->gone && !memcmp(r->gone_prefix, v6_addr, 8)))
-        __atomic_store_n(&v6_withdraw, 1, __ATOMIC_RELEASE);
+    int ours = 0;
+    for (int k = 0; k < r->nprefixes; k++) if (!memcmp(r->prefixes[k], v6_addr, 8)) ours = 1;
+    if (r->router_lifetime == 0 || (r->gone && !memcmp(r->gone_prefix, v6_addr, 8)) ||
+        (r->nprefixes > 0 && !ours))                                 /* le routeur annonce d'autres préfixes, plus le nôtre : il a changé */
+        __atomic_store_n(&v6_withdraw, 1, __ATOMIC_RELEASE);         /* on retire tout ; la RA suivante installe le nouveau */
     else v6_expire = now + r->router_lifetime;
 }
 
