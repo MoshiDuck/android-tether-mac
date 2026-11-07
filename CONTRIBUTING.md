@@ -10,6 +10,6 @@ Thanks for helping! The most valuable contributions:
 ## Pull requests
 
 1. Fork, create a branch, keep changes focused.
-2. `make CFLAGS="-O2 -Wall -Wextra -Werror"` and `make test` must pass; `menubar/build.sh` must build the menu bar app. Any code that parses data from the phone or the network needs a test in `tests/test_main.c` — the fuzz tests run under AddressSanitizer. Add a line to `CHANGELOG.md` under *Unreleased*.
+2. `make strict`, `make test` and `make analyze` must pass; `menubar/build.sh` must build the menu bar app. Any code that parses data from the phone or the network needs a test (`tests/`) — the fuzz tests run under AddressSanitizer. Code that runs in the root supervisor must go through `src/policy.c` and be tested there. New logic belongs in a module under `src/` with its own tests, not in `src/main.c`. Add a line to `CHANGELOG.md` under *Unreleased*.
 3. Describe what you tested (phone model, macOS version).
 4. By submitting a PR you agree your contribution is licensed under GPL-3.0-or-later, like the rest of the project. Add a `Signed-off-by:` line (`git commit -s`) to certify you have the right to submit it ([DCO](https://developercertificate.org)).

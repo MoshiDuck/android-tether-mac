@@ -42,6 +42,7 @@ sudo ./rndis-tether -v -r -w -a
 - `-w` attend le téléphone et se reconnecte après un débranchement
 - `-a` active le Modem USB du téléphone via `adb` (débogage USB requis)
 - `-4` IPv4 uniquement (désactive le relais IPv6)
+- `-W user` utilisateur sans privilèges du processus worker (défaut `nobody`)
 - `-U user` utilisateur pour `adb` (défaut `$SUDO_USER`)
 - `-d vid:pid` cible un appareil précis ; `-v` logs détaillés
 
@@ -49,14 +50,18 @@ Journal du service : `/var/log/rndis-tether.log`.
 
 ## Comment ça marche
 
-Explication détaillée (USB, RNDIS, utun, DHCP, DNS, service) : [docs/how-it-works.fr.md](docs/how-it-works.fr.md)
+Explication détaillée (USB, RNDIS, utun, DHCP, DNS, service, séparation des privilèges) : [docs/how-it-works.fr.md](docs/how-it-works.fr.md)
+
+**Séparation des privilèges** : seul un petit superviseur tourne en root ; tout ce qui analyse des données du téléphone ou du réseau tourne dans un worker sans privilèges (`nobody`), et le superviseur valide chaque demande reçue. Un bogue dans l'analyse des paquets n'est donc plus une faille root.
+
+Où va le projet : [ROADMAP.fr.md](ROADMAP.fr.md).
 
 ## Limites
 
 - IPv6 demande que le téléphone annonce un préfixe `/64` (c'était le cas sur le téléphone testé) ; sinon le tethering reste en IPv4. `-4` désactive IPv6. IPv6 n'est pas plus rapide qu'IPv4 ici : le réseau mobile domine
 - Testé uniquement sur un **Samsung Galaxy S24 Ultra** (`04e8:6864`). Les autres téléphones ne sont pas testés : les retours sont les bienvenus (issue avec modèle et sortie de `sudo ./rndis-tether -v -r -a`)
-- Le renouvellement DHCP (à mi-bail, ~30 min) n'a pas encore été observé sur un bail complet
-- Si le service est tué avec `kill -9`, les routes `0.0.0.0/1` et `128.0.0.0/1` peuvent rester : `sudo route -n delete -net 0.0.0.0/1` et `128.0.0.0/1`
+- DHCP : le renouvellement unicast à T1 a été observé sur le téléphone testé (forme RFC 2131, acceptée par son serveur) ; le rebind à T2 et l'expiration sont couverts par des tests à horloge simulée mais pas encore vus sur un vrai bail
+- Si le superviseur est tué avec `kill -9`, les routes `0.0.0.0/1` et `128.0.0.0/1` peuvent rester : `sudo route -n delete -net 0.0.0.0/1` et `128.0.0.0/1`
 - Si le téléphone propose CDC-NCM/ECM, macOS le gère déjà nativement
 
 ## Contribuer et licence

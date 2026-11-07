@@ -1,0 +1,118 @@
+name: Release
+
+# Déclenché par un tag vX.Y.Z (créé par scripts/release.sh) :
+#   1. vérifie le changelog, construit et teste
+#   2. crée la GitHub Release avec les notes du changelog
+#   3. met à jour la formule Homebrew du tap (si le secret HOMEBREW_TAP_TOKEN existe)
+#   4. vérifie que `brew install` fonctionne depuis le tap, version publiée
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check that the changelog has this version
+        run: |
+          version="${TAG#v}"
+          grep -q "^## \[$version\]" CHANGELOG.md || { echo "CHANGELOG.md has no section for $version" >&2; exit 1; }
+
+      - name: Install dependencies
+        run: brew install libusb pkgconf
+
+      - name: Strict build and tests
+        run: |
+          make strict
+          make
+          make test
+
+      - name: Extract the release notes from the changelog
+        run: |
+          version="${TAG#v}"
+          awk -v v="$version" '
+            $0 ~ "^## \\[" v "\\]" { found = 1; next }
+            /^## \[/ { found = 0 }
+            /^\[[^]]+\]: / { found = 0 }
+            found
+          ' CHANGELOG.md > notes.md
+          test -s notes.md
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG already exists"
+          else
+            gh release create "$TAG" --title "$TAG" --notes-file notes.md --verify-tag
+          fi
+
+      - name: Is the tap token configured?
+        id: tap
+        env:
+          TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -n "$TOKEN" ]; then echo "enabled=true" >> "$GITHUB_OUTPUT"; else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::HOMEBREW_TAP_TOKEN is not set: the formula is not updated by CI (use scripts/release.sh)."
+          fi
+
+      - name: Check out the tap
+        if: steps.tap.outputs.enabled == 'true'
+        uses: actions/checkout@v7
+        with:
+          repository: MoshiDuck/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      - name: Update the formula
+        if: steps.tap.outputs.enabled == 'true'
+        run: |
+          version="${TAG#v}"
+          url="https://github.com/${GITHUB_REPOSITORY}/archive/refs/tags/${TAG}.tar.gz"
+          sha=$(curl -fsSL --retry 5 --retry-delay 2 "$url" | shasum -a 256 | cut -d' ' -f1)
+          test -n "$sha"
+          cd tap
+          sed -i '' -e "s|^  url .*|  url \"$url\"|" -e "s|^  sha256 .*|  sha256 \"$sha\"|" Formula/android-tether-mac.rb
+          if git diff --quiet; then
+            echo "formula already up to date"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -am "android-tether-mac $version"
+            git push
+          fi
+
+  verify-brew:
+    name: Verify brew install
+    needs: release
+    runs-on: macos-latest
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - name: Wait for the formula to point at this version
+        run: |
+          for _ in $(seq 1 60); do
+            if curl -fsSL "https://raw.githubusercontent.com/MoshiDuck/homebrew-tap/main/Formula/android-tether-mac.rb" | grep -q "/${TAG}.tar.gz"; then
+              echo "formula is at ${TAG}"; exit 0
+            fi
+            sleep 10
+          done
+          echo "the tap formula was not updated to ${TAG} within 10 minutes" >&2
+          exit 1
+
+      - name: Install from the tap and run the formula test
+        run: |
+          brew tap MoshiDuck/tap
+          brew install MoshiDuck/tap/android-tether-mac
+          brew test MoshiDuck/tap/android-tether-mac
+          test "$(brew list --versions android-tether-mac | awk '{print $2}')" = "${TAG#v}"

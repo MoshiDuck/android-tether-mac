@@ -14,21 +14,68 @@ concurrency:
 
 jobs:
   build-and-test:
-    runs-on: macos-latest
+    name: Build and test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-26]
+    runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install dependencies
-        run: brew install libusb pkgconf shellcheck
+        run: brew install libusb pkgconf
 
-      - name: Build driver (warnings are errors)
-        run: make CFLAGS="-O2 -Wall -Wextra -Werror"
+      - name: Strict warnings (all warnings are errors)
+        run: make strict
 
-      - name: Unit and fuzz tests (ASan + UBSan)
+      - name: Build driver
+        run: make
+
+      - name: Unit, state-machine and fuzz tests (ASan + UBSan)
         run: make test
 
       - name: Build menu bar app
         run: menubar/build.sh
 
+  brew-head:
+    name: Homebrew HEAD install
+    # À chaque push sur main : la dernière version du dépôt doit toujours s'installer via Homebrew
+    if: github.event_name == 'push'
+    runs-on: macos-latest
+    steps:
+      - name: Install the tap formula from HEAD and run its test
+        run: |
+          brew tap MoshiDuck/tap
+          brew install --HEAD MoshiDuck/tap/android-tether-mac
+          brew test MoshiDuck/tap/android-tether-mac
+
+  quality:
+    name: Static analysis, coverage, lint
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install dependencies
+        run: brew install libusb pkgconf shellcheck actionlint
+
+      - name: Clang static analyzer
+        run: make analyze
+
+      - name: Coverage report and thresholds
+        run: |
+          make coverage | tee coverage.txt
+          scripts/check-coverage.sh coverage.txt dhcp.c=95 policy.c=95 ipc.c=95 TOTAL=50
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-report
+          path: coverage.txt
+
       - name: Lint shell scripts
-        run: shellcheck install.sh uninstall.sh menubar/build.sh scripts/release.sh
+        run: shellcheck install.sh uninstall.sh menubar/build.sh scripts/*.sh
+
+      - name: Lint workflows
+        run: actionlint

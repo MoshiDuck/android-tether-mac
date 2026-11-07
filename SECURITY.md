@@ -2,7 +2,14 @@
 
 ## Why this matters
 
-TetherMac's background service runs as **root** and parses data sent by a USB device (the phone) and by the network behind it. Memory-safety bugs in that parsing are security bugs. The test suite (`make test`) fuzzes these parsers under AddressSanitizer/UBSan.
+TetherMac's background service parses data sent by a USB device (the phone) and by the network behind it. Memory-safety bugs in that parsing are security bugs. The test suite (`make test`) fuzzes these parsers under AddressSanitizer/UBSan.
+
+**Trust model.** The service is split in two processes:
+
+- the **supervisor** runs as root, is small, and never parses data from the phone or the network. It creates the `utun` interface, applies network configuration only after validating it (`src/policy.c`), and cleans up;
+- the **worker** does all the parsing (USB, RNDIS, DHCP, NDP, packets) as an unprivileged user (`nobody`) and can only ask the supervisor for five precise actions over a fixed-size channel (`src/ipc.h`).
+
+The worker is treated as *untrusted*. The worker is not sandboxed yet (see the [roadmap](ROADMAP.md)).
 
 ## Supported versions
 
@@ -21,7 +28,7 @@ Use GitHub's private reporting: on the repository page go to **Security → Repo
 
 Please include:
 
-- what the problem is and which component is affected (`main.c` function, install scripts, menu bar app);
+- what the problem is and which component is affected (a function in `src/`, the install scripts, the menu bar app);
 - how to reproduce it (a crafted USB descriptor, a malformed RNDIS/DHCP packet, a script, …);
 - the version (`brew info android-tether-mac` or the git commit).
 
@@ -31,3 +38,4 @@ You can expect an acknowledgement within a few days. Fixes are released as soon 
 
 - The service trusts the *local administrator*: anyone who can already run commands as root can do anything, so that is out of scope.
 - The service does not trust the phone or the network: out-of-bounds reads, crashes caused by malformed input, and command injection through values read from the device are all in scope.
+- **Privilege boundary issues are in scope and valuable**: a way for the worker to make the supervisor run something it should not, to apply a configuration that `policy.c` should have refused, to regain root, or to leak the supervisor's file descriptors.

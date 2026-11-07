@@ -5,19 +5,28 @@
  * Principe :
  *   - libusb parle RNDIS directement au téléphone (aucun kext / DriverKit)
  *   - une interface utun (L3) expose le réseau au système
- *   - ARP et DHCP (client) sont gérés ici car RNDIS transporte des trames Ethernet
+ *   - ARP, DHCP, NDP sont gérés ici car RNDIS transporte des trames Ethernet
  *
- * Lancer avec sudo (création utun, ifconfig, route).
+ * Deux processus (séparation des privilèges) :
+ *   - le SUPERVISEUR (root) ne fait presque rien : il crée l'interface utun, applique la configuration
+ *     réseau (ifconfig, route, scutil) après validation par policy.c, et nettoie à la fin ;
+ *   - le WORKER, lancé par fork() puis réduit à l'utilisateur « nobody », fait tout ce qui lit des
+ *     données hostiles (USB, RNDIS, DHCP, NDP, paquets). Il reçoit l'interface utun par passage de
+ *     descripteur et ne peut demander au superviseur que des actions précises (ipc.h).
+ *
+ * Lancer avec sudo.
  */
 #define _DARWIN_C_SOURCE
 #include <arpa/inet.h>
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <libusb.h>
 #include <net/if.h>
 #include <net/if_utun.h>
 #include <poll.h>
 #include <pthread.h>
+#include <pwd.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -29,8 +38,14 @@
 #include <sys/stat.h>
 #include <sys/kern_control.h>
 #include <sys/sys_domain.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+
+#include "bytes.h"
+#include "dhcp.h"
+#include "ipc.h"
+#include "policy.h"
 
 /* ---------- RNDIS ---------- */
 #define RNDIS_PACKET_MSG        0x00000001u
@@ -58,8 +73,10 @@ static int mps_out = 512;
 
 static volatile sig_atomic_t running = 1, quit;
 static int verbose, want_route, wait_mode, dns_applied, auto_adb;
-static uint32_t srv_ip, renew_period; /* DHCP: serveur et période de renouvellement (s) */
-static volatile uint32_t renew_xid;   /* xid de la dernière demande de renouvellement (0 = aucune en attente) */
+static uint32_t srv_ip;               /* DHCP : serveur */
+static struct dhcp_client dhcp_c;     /* cycle de vie du bail (voir dhcp.c) ; protégé par dhcp_lock */
+static int dhcp_active;               /* un bail est géré (session établie) */
+static pthread_mutex_t dhcp_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* IPv6 : adresse SLAAC construite à partir de la première annonce de routeur (RA) reçue */
 static int ipv6_on = 1;               /* -4 le désactive */
@@ -73,10 +90,26 @@ static char utun_name[IFNAMSIZ];
 static uint8_t my_mac[6], gw_mac[6];
 static uint32_t my_ip, gw_ip; /* network order */
 static uint32_t req_counter = 1;
+
+/* Séparation des privilèges */
+#define EXIT_NO_DEVICE 3                /* worker : aucun appareil RNDIS (sans -w) */
+#define EXIT_FATAL 70                   /* worker : impossible d'abandonner les privilèges */
+static int worker_mode;                 /* 1 dans le processus sans privilèges */
+static int ipc_sock = -1;               /* worker : canal vers le superviseur */
+static pthread_mutex_t ipc_lock = PTHREAD_MUTEX_INITIALIZER;
+static const char *worker_user = "nobody";
 static pthread_mutex_t tx_lock = PTHREAD_MUTEX_INITIALIZER;
 
-static void logf_(const char *fmt, ...) {
+#define PRINTF_LIKE(f, a) __attribute__((format(printf, f, a)))
+
+#ifdef RNDIS_TESTING
+/* Compilé avec -DRNDIS_TESTING (tests uniquement) : les commandes système sont enregistrées, pas exécutées. */
+void test_record_command(const char *cmd);
+#endif
+
+PRINTF_LIKE(1, 2) static void logf_(const char *fmt, ...) {
     va_list ap;
+    fputs(worker_mode ? "[worker] " : "[root] ", stderr);
     va_start(ap, fmt);
     vfprintf(stderr, fmt, ap);
     va_end(ap);
@@ -85,13 +118,68 @@ static void logf_(const char *fmt, ...) {
 #define LOG(...) logf_(__VA_ARGS__)
 #define VLOG(...) do { if (verbose) logf_(__VA_ARGS__); } while (0)
 
-static void put32(uint8_t *p, uint32_t v) { p[0] = v; p[1] = v >> 8; p[2] = v >> 16; p[3] = v >> 24; }
-static uint32_t get32(const uint8_t *p) { return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24; }
-static uint32_t be32(const uint8_t *p) { return (uint32_t)p[0] << 24 | p[1] << 16 | p[2] << 8 | p[3]; }
-static void putbe16(uint8_t *p, uint16_t v) { p[0] = v >> 8; p[1] = v; }
-static void putbe32(uint8_t *p, uint32_t v) { p[0] = v >> 24; p[1] = v >> 16; p[2] = v >> 8; p[3] = v; }
-
 static void on_signal(int s) { (void)s; running = 0; quit = 1; }
+
+/* Horloge monotone en secondes : continue d'avancer pendant la veille du Mac (comme le bail DHCP). */
+static int64_t now_s(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return t.tv_sec;
+}
+
+/* ---------- Worker : demandes au superviseur ----------
+ * Appel synchrone (une demande, une réponse). Retourne le code de la réponse (0 = accepté),
+ * ou -1 si le canal est rompu : le worker s'arrête alors (le superviseur a disparu). */
+static int ipc_call(int type, const void *data, size_t len, struct ipc_msg *reply, int *fd_out, int timeout_ms) {
+    struct ipc_msg rq, rp;
+    int fd = -1, r;
+    if (len > IPC_DATA_MAX) return -1;
+    memset(&rq, 0, sizeof rq);
+    rq.type = (uint8_t)type;
+    rq.len = (uint16_t)len;
+    if (len) memcpy(rq.data, data, len);
+    pthread_mutex_lock(&ipc_lock);
+    r = ipc_send(ipc_sock, &rq, -1) < 0 ? -1 : ipc_recv(ipc_sock, &rp, &fd, timeout_ms);
+    pthread_mutex_unlock(&ipc_lock);
+    if (r != 1 || rp.type != IPC_REPLY) {
+        if (fd >= 0) close(fd);
+        LOG("Canal avec le superviseur perdu : arrêt");
+        running = 0;
+        quit = 1;
+        return -1;
+    }
+    if (reply) *reply = rp;
+    if (fd_out) *fd_out = fd; else if (fd >= 0) close(fd);
+    return rp.status;
+}
+
+/* Demande l'interface utun : retourne son descripteur (nom dans utun_name) ou -1. */
+static int request_utun(void) {
+    struct ipc_msg rp;
+    int fd = -1;
+    if (ipc_call(IPC_REQ_UTUN, NULL, 0, &rp, &fd, 15000) != 0 || fd < 0 || rp.len < 5 || rp.len >= IFNAMSIZ ||
+        memcmp(rp.data, "utun", 4) != 0) {
+        if (fd >= 0) close(fd);
+        return -1;
+    }
+    memcpy(utun_name, rp.data, rp.len);
+    utun_name[rp.len] = '\0';
+    return fd;
+}
+
+static int request_config4(const struct lease *L) {
+    uint8_t d[16];
+    memcpy(d, &L->ip, 4); memcpy(d + 4, &L->gw, 4); memcpy(d + 8, &L->mask, 4); memcpy(d + 12, &L->dns, 4);
+    return ipc_call(IPC_REQ_CONFIG4, d, sizeof d, NULL, NULL, 30000) == 0 ? 0 : -1;
+}
+
+static void request_config6(void) {
+    uint8_t d[32];
+    memcpy(d, v6_addr, 16); memcpy(d + 16, v6_router, 16);
+    if (ipc_call(IPC_REQ_CONFIG6, d, sizeof d, NULL, NULL, 30000) > 0) LOG("IPv6: configuration refusée par le superviseur");
+}
+
+static void request_adb(void) { ipc_call(IPC_REQ_ADB, NULL, 0, NULL, NULL, 90000); }
 
 /* ---------- Contrôle par l'icône de barre de menus ----------
  * Le service tourne en root ; l'app (utilisateur) crée/supprime FLAG_DISABLED pour
@@ -104,6 +192,9 @@ static char status_text[160] = "starting";
 static int is_disabled(void) { return access(FLAG_DISABLED, F_OK) == 0; }
 
 static void status_write(void) {
+#ifdef RNDIS_TESTING
+    return;                                 /* les tests ne touchent pas au vrai fichier d'état */
+#endif
     FILE *f = fopen(STATUS_FILE ".tmp", "w");
     if (!f) return;
     fprintf(f, "%s\n", status_text);
@@ -112,7 +203,7 @@ static void status_write(void) {
     rename(STATUS_FILE ".tmp", STATUS_FILE);
 }
 
-static void set_status(const char *fmt, ...) {
+PRINTF_LIKE(1, 2) static void set_status(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(status_text, sizeof status_text, fmt, ap);
@@ -123,6 +214,13 @@ static void set_status(const char *fmt, ...) {
 /* Change l'état s'il diffère, sinon rafraîchit le fichier au plus toutes les 5 s. */
 static void status_tick(const char *text) {
     static time_t last;
+    if (worker_mode) {                  /* le worker signale les changements ; le superviseur écrit le fichier */
+        if (text && strcmp(text, status_text)) {
+            snprintf(status_text, sizeof status_text, "%s", text);
+            ipc_call(IPC_REQ_STATUS, text, strlen(text), NULL, NULL, 5000);
+        }
+        return;
+    }
     time_t now = time(NULL);
     if (text && strcmp(text, status_text)) { set_status("%s", text); last = now; }
     else if (now - last >= 5) { status_write(); last = now; }
@@ -130,7 +228,10 @@ static void status_tick(const char *text) {
 
 /* ---------- RNDIS control channel ---------- */
 static int ctrl_send(const uint8_t *msg, size_t len) {
-    return libusb_control_transfer(h, 0x21, CDC_SEND_ENCAPSULATED, 0, ctrl_if, (uint8_t *)msg, len, 1000);
+    uint8_t buf[256];                                 /* libusb veut un tampon non const, même en émission */
+    if (len > sizeof buf) return LIBUSB_ERROR_INVALID_PARAM;
+    memcpy(buf, msg, len);
+    return libusb_control_transfer(h, 0x21, CDC_SEND_ENCAPSULATED, 0, ctrl_if, buf, len, 1000);
 }
 
 static void answer_keepalive(const uint8_t *req) {
@@ -240,73 +341,13 @@ static void rx_parse(const uint8_t *buf, int n, frame_cb cb, void *arg) {
 }
 
 /* ---------- DHCP client ---------- */
-struct lease { uint32_t ip, mask, gw, dns, srv, secs; uint8_t type; uint8_t srvmac[6]; };
-static const uint8_t cookie[4] = {0x63, 0x82, 0x53, 0x63};
-
-static uint16_t ip_csum(const uint8_t *p, int len) {
-    uint32_t s = 0;
-    for (int i = 0; i + 1 < len; i += 2) s += p[i] << 8 | p[i + 1];
-    while (s >> 16) s = (s & 0xffff) + (s >> 16);
-    return ~s;
-}
-
-static int build_dhcp(uint8_t *f, uint8_t type, uint32_t xid, uint32_t req_ip, uint32_t srv_ip) {
-    memset(f, 0, 600);
-    memset(f, 0xff, 6); memcpy(f + 6, my_mac, 6); putbe16(f + 12, 0x0800);
-    uint8_t *ip = f + 14, *udp = ip + 20, *b = udp + 8;
-    b[0] = 1; b[1] = 1; b[2] = 6;
-    putbe32(b + 4, xid);
-    putbe16(b + 10, 0x8000); /* réponse en broadcast */
-    memcpy(b + 28, my_mac, 6);
-    memcpy(b + 236, cookie, 4);
-    uint8_t *o = b + 240;
-    *o++ = 53; *o++ = 1; *o++ = type;
-    if (req_ip) { *o++ = 50; *o++ = 4; memcpy(o, &req_ip, 4); o += 4; }
-    if (srv_ip) { *o++ = 54; *o++ = 4; memcpy(o, &srv_ip, 4); o += 4; }
-    *o++ = 55; *o++ = 4; *o++ = 1; *o++ = 3; *o++ = 6; *o++ = 51;
-    *o++ = 255;
-    int blen = o - b; if (blen < 300) blen = 300;
-    int udplen = 8 + blen, iplen = 20 + udplen;
-    ip[0] = 0x45; putbe16(ip + 2, iplen); ip[8] = 64; ip[9] = 17;
-    memset(ip + 16, 0xff, 4);
-    putbe16(ip + 10, ip_csum(ip, 20));
-    putbe16(udp, 68); putbe16(udp + 2, 67); putbe16(udp + 4, udplen);
-    return 14 + iplen;
-}
-
-static int dhcp_parse(const uint8_t *f, int len, uint32_t xid, struct lease *L) {
-    if (len < 14 + 20 + 8 + 240 || f[12] != 0x08 || f[13] != 0x00) return -1;
-    const uint8_t *ip = f + 14;
-    int ihl = (ip[0] & 15) * 4;
-    if ((ip[0] >> 4) != 4 || ihl < 20 || len < 14 + ihl + 8 + 240 || ip[9] != 17) return -1;
-    const uint8_t *udp = ip + ihl, *b = udp + 8;
-    if ((udp[2] << 8 | udp[3]) != 68 || b[0] != 2 || be32(b + 4) != xid) return -1;
-    if (memcmp(b + 28, my_mac, 6) || memcmp(b + 236, cookie, 4)) return -1;
-    memset(L, 0, sizeof *L);
-    memcpy(&L->ip, b + 16, 4);
-    memcpy(L->srvmac, f + 6, 6);
-    const uint8_t *o = b + 240, *end = f + len;
-    while (o < end && *o != 255) {
-        if (*o == 0) { o++; continue; }
-        if (o + 2 > end || o + 2 + o[1] > end) break;
-        uint8_t code = o[0], l = o[1];
-        if (code == 53 && l >= 1) L->type = o[2];
-        else if (code == 1 && l >= 4) memcpy(&L->mask, o + 2, 4);
-        else if (code == 3 && l >= 4) memcpy(&L->gw, o + 2, 4);
-        else if (code == 6 && l >= 4) memcpy(&L->dns, o + 2, 4);
-        else if (code == 51 && l >= 4) L->secs = be32(o + 2);
-        else if (code == 54 && l >= 4) memcpy(&L->srv, o + 2, 4);
-        o += 2 + l;
-    }
-    return 0;
-}
-
+/* Construction, analyse et cycle de vie du bail : voir dhcp.c (testés sans USB ni horloge). */
 struct dhcp_wait { uint32_t xid; uint8_t want; struct lease L; int done, nak; };
 
 static void dhcp_cb(const uint8_t *f, int len, void *arg) {
     struct dhcp_wait *w = arg;
     struct lease L;
-    if (w->done || dhcp_parse(f, len, w->xid, &L) < 0) return;
+    if (w->done || dhcp_parse(f, len, my_mac, w->xid, &L) < 0) return;
     if (L.type == 6) { w->nak = 1; return; }
     if (L.type == w->want) { w->L = L; w->done = 1; }
 }
@@ -333,12 +374,12 @@ static int dhcp_acquire(struct lease *out) {
     for (int attempt = 1; attempt <= 6 && running; attempt++) {
         struct dhcp_wait w = {.xid = rand(), .want = 2};
         VLOG("DHCP DISCOVER (essai %d)", attempt);
-        send_frame(f, build_dhcp(f, 1, w.xid, 0, 0));
+        send_frame(f, dhcp_build(f, my_mac, 1, w.xid, 0, 0));
         if (dhcp_wait_for(&w, 3000) < 0) continue;
         struct lease offer = w.L;
         w.done = 0; w.want = 5;
         VLOG("DHCP OFFER %s, REQUEST", inet_ntoa((struct in_addr){offer.ip}));
-        send_frame(f, build_dhcp(f, 3, w.xid, offer.ip, offer.srv));
+        send_frame(f, dhcp_build(f, my_mac, 3, w.xid, offer.ip, offer.srv));
         if (dhcp_wait_for(&w, 3000) < 0) continue;
         *out = w.L;
         if (!out->gw) out->gw = out->srv;
@@ -350,6 +391,10 @@ static int dhcp_acquire(struct lease *out) {
 
 /* ---------- utun ---------- */
 static int utun_open(void) {
+#ifdef RNDIS_TESTING
+    snprintf(utun_name, sizeof utun_name, "utun99");
+    return open("/dev/null", O_RDWR);
+#endif
     int fd = socket(PF_SYSTEM, SOCK_DGRAM, SYSPROTO_CONTROL);
     if (fd < 0) { perror("socket(utun)"); return -1; }
     struct ctl_info ci;
@@ -370,12 +415,16 @@ static int utun_open(void) {
     return fd;
 }
 
-static void sh(const char *fmt, ...) {
+PRINTF_LIKE(1, 2) static void sh(const char *fmt, ...) {
     char cmd[256];
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(cmd, sizeof cmd, fmt, ap);
     va_end(ap);
+#ifdef RNDIS_TESTING
+    test_record_command(cmd);
+    return;
+#endif
     VLOG("$ %s", cmd);
     if (system(cmd) != 0) VLOG("(commande en échec)");
 }
@@ -384,6 +433,10 @@ static void ipstr(uint32_t ip, char *out) { inet_ntop(AF_INET, &ip, out, INET_AD
 
 /* DNS via SystemConfiguration : résolveur « supplémentaire » valable pour tous les domaines */
 static void scutil_run(const char *script) {
+#ifdef RNDIS_TESTING
+    test_record_command(script);
+    return;
+#endif
     FILE *p = popen("/usr/sbin/scutil >/dev/null 2>&1", "w");
     if (p) { fputs(script, p); pclose(p); }
 }
@@ -610,12 +663,20 @@ static void rx_frame(const uint8_t *f, int len, void *arg) {
     if (et == 0x0806) { handle_arp(f, len); return; }
     if (et == 0x86DD) { if (ipv6_on) handle_ipv6(f, len); return; }
     if (et != 0x0800 || len < 34) return;
-    /* réponse du serveur DHCP à notre demande de renouvellement : on le consigne, sans le relayer */
-    if (renew_xid && f[23] == 17) {
+    /* réponse du serveur DHCP à notre demande de renouvellement : traitée ici, jamais relayée */
+    if (f[23] == 17 && dhcp_active) {
         struct lease L;
-        if (dhcp_parse(f, len, renew_xid, &L) == 0) {
-            if (L.type == 5) { LOG("DHCP: bail renouvelé (%us)", L.secs); renew_xid = 0; }
-            else if (L.type == 6) LOG("DHCP: renouvellement refusé (NAK)");
+        enum dhcp_input res = DHCP_IGNORED;
+        int match;
+        pthread_mutex_lock(&dhcp_lock);
+        match = dhcp_c.xid && dhcp_parse(f, len, my_mac, dhcp_c.xid, &L) == 0;
+        if (match) res = dhcp_client_input(&dhcp_c, &L, now_s());
+        uint32_t lease = dhcp_c.lease, t1 = dhcp_c.t1, t2 = dhcp_c.t2;
+        pthread_mutex_unlock(&dhcp_lock);
+        if (match) {
+            if (res == DHCP_ACKED) LOG("DHCP: bail renouvelé (%us, T1 %us, T2 %us)", lease, t1, t2);
+            else if (res == DHCP_NAKED) { LOG("DHCP: renouvellement refusé (NAK), relance de la session"); running = 0; }
+            else if (res == DHCP_ADDR_CHANGED) { LOG("DHCP: le serveur impose une autre adresse, relance de la session"); running = 0; }
             return;
         }
     }
@@ -688,19 +749,26 @@ static void *tx_thread(void *a) {
 static void *ctrl_thread(void *a) {
     (void)a;
     uint8_t n[16], resp[4096], f[700];
-    time_t next_renew = time(NULL) + renew_period, next_rs = time(NULL) + 1;
+    time_t next_rs = time(NULL) + 1;
     int rs_sent = 0;
     while (running) {
-        if (renew_period && time(NULL) >= next_renew) {
-            LOG("DHCP: demande de renouvellement");
-            renew_xid = arc4random() | 1;                     /* jamais 0 */
-            send_frame(f, build_dhcp(f, 3, renew_xid, my_ip, srv_ip));
-            next_renew += renew_period;
+        if (dhcp_active) {                                    /* T1 / T2 / expiration du bail (RFC 2131) */
+            pthread_mutex_lock(&dhcp_lock);
+            enum dhcp_action act = dhcp_client_tick(&dhcp_c, now_s(), arc4random() | 1);
+            struct dhcp_client snap = dhcp_c;
+            pthread_mutex_unlock(&dhcp_lock);
+            if (act == DHCP_SEND_RENEW || act == DHCP_SEND_REBIND) {
+                LOG("DHCP: %s", act == DHCP_SEND_RENEW ? "demande de renouvellement (unicast)" : "rebind (broadcast)");
+                send_frame(f, dhcp_build_renew(f, my_mac, snap.xid, snap.ip, snap.srvmac, snap.srv, act == DHCP_SEND_RENEW));
+            } else if (act == DHCP_RESTART) {
+                LOG("DHCP: bail expiré sans réponse du serveur, relance de la session");
+                running = 0;
+            }
         }
         if (ipv6_on) {
             if (__atomic_load_n(&v6_pending, __ATOMIC_ACQUIRE)) {
                 __atomic_store_n(&v6_pending, 0, __ATOMIC_RELAXED);
-                configure_ipv6();
+                request_config6();
             } else if (!v6_claimed && rs_sent < 5 && time(NULL) >= next_rs) {
                 uint8_t rs[14 + 40 + 16];                     /* on sollicite une RA (réponse quasi immédiate) */
                 VLOG("IPv6: sollicitation de routeur (%d)", rs_sent + 1);
@@ -792,18 +860,212 @@ static void usage(const char *p) {
                     "  -w  attendre le téléphone et se reconnecter après un débranchement\n"
                     "  -a  activer le Modem USB du téléphone via adb (débogage USB requis)\n"
                     "  -U  utilisateur pour adb (défaut: SUDO_USER ; requis en LaunchDaemon)\n"
+                    "  -W  utilisateur sans privilèges du worker (défaut: nobody)\n"
                     "  -4  IPv4 uniquement (désactive le relais IPv6)\n"
                     "  -v  logs détaillés\n"
                     "  -d  cibler un appareil précis (hex), ex: 18d1:4ee3\n", p);
 }
 
+/* ---------- Superviseur (root) ---------- */
+static int cfg4_done, cfg6_done;        /* configuration déjà appliquée pour le worker courant */
+static time_t last_adb_run;
+
+/* Traite une demande du worker. Il ne peut demander que des actions précises, et chaque valeur
+ * est validée par policy.c : un worker compromis ne peut pas faire exécuter autre chose. */
+static void handle_request(int sock, const struct ipc_msg *rq) {
+    struct ipc_msg rp;
+    int pass_fd = -1;
+    memset(&rp, 0, sizeof rp);
+    rp.type = IPC_REPLY;
+    switch (rq->type) {
+    case IPC_REQ_UTUN:
+        if (utun_fd >= 0) { rp.status = 200; break; }                /* une seule interface par worker */
+        if ((utun_fd = utun_open()) < 0) { rp.status = 201; break; }
+        rp.len = (uint16_t)strlen(utun_name);
+        memcpy(rp.data, utun_name, rp.len);
+        pass_fd = utun_fd;
+        break;
+    case IPC_REQ_CONFIG4: {
+        uint32_t ip, gw, mask, dns;
+        struct lease L;
+        if (utun_fd < 0 || cfg4_done || rq->len != 16) { rp.status = 200; break; }
+        memcpy(&ip, rq->data, 4); memcpy(&gw, rq->data + 4, 4);
+        memcpy(&mask, rq->data + 8, 4); memcpy(&dns, rq->data + 12, 4);
+        int e = policy_check_v4(ip, gw, mask, dns);
+        if (e) { LOG("Configuration IPv4 refusée : %s", policy_strerror(e)); rp.status = (uint8_t)e; break; }
+        memset(&L, 0, sizeof L);
+        L.ip = ip; L.gw = gw; L.mask = mask; L.dns = dns;
+        my_ip = ip; gw_ip = gw;
+        configure_iface(&L);
+        cfg4_done = 1;
+        break;
+    }
+    case IPC_REQ_CONFIG6: {
+        if (!ipv6_on || utun_fd < 0 || !cfg4_done || cfg6_done || rq->len != 32) { rp.status = 200; break; }
+        int e = policy_check_v6(rq->data, rq->data + 16);
+        if (e) { LOG("Configuration IPv6 refusée : %s", policy_strerror(e)); rp.status = (uint8_t)e; break; }
+        memcpy(v6_addr, rq->data, 16);
+        memcpy(v6_router, rq->data + 16, 16);
+        configure_ipv6();
+        cfg6_done = 1;
+        break;
+    }
+    case IPC_REQ_STATUS: {
+        int e = policy_check_status((const char *)rq->data, rq->len);
+        if (e == POLICY_OK && !strncmp((const char *)rq->data, "connected ", 10)) {
+            size_t n = strlen(utun_name);                            /* l'interface annoncée doit être la nôtre */
+            if (utun_fd < 0 || rq->len < n + 1 || memcmp(rq->data + rq->len - n, utun_name, n) ||
+                rq->data[rq->len - n - 1] != ' ')
+                e = POLICY_BAD_STATUS;
+        }
+        if (e) { rp.status = (uint8_t)e; break; }
+        char text[POLICY_STATUS_MAX + 1];
+        memcpy(text, rq->data, rq->len);
+        text[rq->len] = '\0';
+        status_tick(text);
+        break;
+    }
+    case IPC_REQ_ADB:
+        if (!auto_adb || time(NULL) - last_adb_run < 10) { rp.status = 200; break; }
+        last_adb_run = time(NULL);
+        adb_enable();
+        break;
+    default:
+        rp.status = 255;
+    }
+    if (ipc_send(sock, &rp, pass_fd) < 0) LOG("Réponse au worker non envoyée");
+}
+
+/* Abandon définitif des privilèges. Échoue si le retour à root reste possible. */
+static int drop_privileges(uid_t uid, gid_t gid) {
+    if (setgroups(0, NULL) < 0) return -1;
+    if (setgid(gid) < 0 || setuid(uid) < 0) return -1;
+    if (getuid() != uid || geteuid() != uid || getgid() != gid || getegid() != gid) return -1;
+    if (setuid(0) == 0 || setgid(0) == 0) return -1;                 /* ne doit plus jamais redevenir root */
+    return 0;
+}
+
+/* ---------- Worker (sans privilèges) ---------- */
+static int worker_run(unsigned vid, unsigned pid) {
+    if (libusb_init(&ctx)) { LOG("libusb_init a échoué"); return EXIT_FATAL; }
+    int rc = 0, announced = 0;
+    time_t last_adb = 0;
+    while (!quit && !is_disabled()) {
+        int ok = find_device(vid, pid) == 0;
+        if (!ok && auto_adb && time(NULL) - last_adb >= 10) {
+            last_adb = time(NULL);
+            LOG("Activation du Modem USB via adb…");
+            request_adb();
+            sleep(3);
+            ok = find_device(vid, pid) == 0;
+        }
+        if (!ok) {
+            if (!wait_mode) {
+                LOG("Aucun appareil RNDIS. Branche le téléphone puis active Réglages > Point d'accès > Partage de connexion USB.");
+                rc = EXIT_NO_DEVICE;
+                break;
+            }
+            if (!announced) { LOG("En attente d'un téléphone en mode Modem USB…"); announced = 1; }
+            status_tick("waiting");
+            sleep(2);
+            continue;
+        }
+        rc = session();                  /* une seule session par worker : le suivant repart d'un état neuf */
+        break;
+    }
+    libusb_exit(ctx);
+    return quit ? 0 : rc;
+}
+
+static int worker_main(int sock, unsigned vid, unsigned pid, uid_t uid, gid_t gid) {
+    worker_mode = 1;
+    ipc_sock = sock;
+    for (int fd = 3; fd < 256; fd++)     /* ne garde que stdin/stdout/stderr et le canal du superviseur */
+        if (fd != sock) close(fd);
+    if (drop_privileges(uid, gid) < 0) {
+        LOG("Impossible d'abandonner les privilèges (%s)", strerror(errno));
+        return EXIT_FATAL;
+    }
+    VLOG("démarré avec uid=%u gid=%u", (unsigned)getuid(), (unsigned)getgid());
+    return worker_run(vid, pid);
+}
+
+/* Lance un worker et le sert jusqu'à sa fin ; nettoie ensuite la configuration réseau. Retourne son code de sortie. */
+static int run_worker_once(unsigned vid, unsigned pid, uid_t uid, gid_t gid) {
+    int sv[2], status = 0, reaped = 0;
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) < 0) { perror("socketpair"); return EXIT_FATAL; }
+    fflush(stderr);
+    pid_t child = fork();
+    if (child < 0) { perror("fork"); close(sv[0]); close(sv[1]); return EXIT_FATAL; }
+    if (child == 0) {
+        close(sv[0]);
+        _exit(worker_main(sv[1], vid, pid, uid, gid));
+    }
+    close(sv[1]);
+    utun_fd = -1; cfg4_done = cfg6_done = 0; my_ip = gw_ip = 0;
+    v6_routes = v6_svc = 0;
+
+    for (;;) {
+        struct ipc_msg m;
+        int fd = -1;
+        int r = ipc_recv(sv[0], &m, &fd, 1000);
+        if (r == 1) {
+            if (fd >= 0) close(fd);                                  /* un worker n'a aucune raison de nous passer un descripteur */
+            handle_request(sv[0], &m);
+        } else if (r < 0) {
+            break;                                                   /* worker disparu ou message invalide */
+        }
+        status_tick(NULL);                                           /* rafraîchit le fichier d'état */
+        if (quit || is_disabled()) { kill(child, SIGTERM); break; }
+        if (waitpid(child, &status, WNOHANG) == child) { reaped = 1; break; }
+    }
+
+    if (!reaped) {                                                   /* s'assure que le worker est bien terminé */
+        kill(child, SIGTERM);
+        for (int k = 0; k < 30 && !reaped; k++) {
+            if (waitpid(child, &status, WNOHANG) == child) reaped = 1; else usleep(100000);
+        }
+        if (!reaped) { kill(child, SIGKILL); waitpid(child, &status, 0); }
+    }
+    unconfigure_iface();                                             /* routes, DNS : retirés par le superviseur, jamais par le worker */
+    if (utun_fd >= 0) { close(utun_fd); utun_fd = -1; }
+    close(sv[0]);
+    return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
+}
+
+static int supervisor_main(unsigned vid, unsigned pid) {
+    struct passwd *pw = getpwnam(worker_user);
+    if (!pw || pw->pw_uid == 0) {                                    /* jamais de worker en root */
+        LOG("Utilisateur du worker introuvable ou root : %s", worker_user);
+        return 1;
+    }
+    uid_t uid = pw->pw_uid;
+    gid_t gid = pw->pw_gid;
+    LOG("Superviseur démarré ; le worker tournera sans privilèges (utilisateur %s)", worker_user);
+    int rc = 0;
+    while (!quit) {
+        if (is_disabled()) { status_tick("disabled"); sleep(1); continue; }
+        time_t t0 = time(NULL);
+        int code = run_worker_once(vid, pid, uid, gid);
+        if (quit) break;
+        if (code == EXIT_FATAL) { LOG("Le worker n'a pas pu démarrer : arrêt"); rc = 1; break; }
+        if (!wait_mode) { rc = code == 0 ? 0 : 1; break; }
+        status_tick("waiting");
+        LOG("Session terminée, nouvelle tentative…");
+        sleep(time(NULL) - t0 < 3 ? 5 : 2);                          /* évite une boucle serrée si le worker échoue aussitôt */
+    }
+    set_status("stopped");
+    return rc;
+}
+
 int main(int argc, char **argv) {
     unsigned vid = 0, pid = 0;
     int opt;
-    while ((opt = getopt(argc, argv, "rwavd:U:4h")) != -1) {
+    while ((opt = getopt(argc, argv, "rwavd:U:W:4h")) != -1) {
         switch (opt) {
         case '4': ipv6_on = 0; break;
         case 'U': adb_user = optarg; break;
+        case 'W': worker_user = optarg; break;
         case 'a': auto_adb = 1; break;
         case 'r': want_route = 1; break;
         case 'w': wait_mode = 1; break;
@@ -814,42 +1076,13 @@ int main(int argc, char **argv) {
     }
     if (geteuid() != 0) { LOG("Il faut les droits root : sudo %s", argv[0]); return 1; }
     signal(SIGINT, on_signal); signal(SIGTERM, on_signal); signal(SIGPIPE, SIG_IGN);
-
-    if (libusb_init(&ctx)) { LOG("libusb_init a échoué"); return 1; }
-    int rc = 1, announced = 0;
-    time_t last_adb = 0;
-    do {
-        if (is_disabled()) { status_tick("disabled"); sleep(1); continue; }
-        int ok = find_device(vid, pid) == 0;
-        if (!ok && auto_adb && time(NULL) - last_adb >= 10) {
-            last_adb = time(NULL);
-            LOG("Activation du Modem USB via adb…");
-            adb_enable();
-            sleep(3);
-            ok = find_device(vid, pid) == 0;
-        }
-        if (!ok) {
-            if (!wait_mode) {
-                LOG("Aucun appareil RNDIS. Branche le téléphone puis active Réglages > Point d'accès > Partage de connexion USB.");
-                break;
-            }
-            if (!announced) { LOG("En attente d'un téléphone en mode Modem USB…"); announced = 1; }
-            status_tick("waiting");
-            sleep(2);
-            continue;
-        }
-        announced = 0;
-        rc = session();
-        if (wait_mode && !quit) { LOG("Session terminée, nouvelle tentative…"); sleep(2); }
-    } while (wait_mode && !quit);
-    set_status("stopped");
-    libusb_exit(ctx);
-    return rc;
+    return supervisor_main(vid, pid);
 }
 
 static int session(void) {
     int rc = 1;
-    running = 1; utun_fd = -1; my_ip = gw_ip = srv_ip = renew_period = renew_xid = 0;
+    running = 1; utun_fd = -1; my_ip = gw_ip = srv_ip = 0;
+    dhcp_active = 0; memset(&dhcp_c, 0, sizeof dhcp_c);
     v6_claimed = v6_pending = v6_routes = v6_svc = 0;
     status_tick("connecting");
     if (libusb_claim_interface(h, ctrl_if) || libusb_claim_interface(h, data_if)) {
@@ -858,16 +1091,20 @@ static int session(void) {
     if (rndis_init() < 0) goto out;
     LOG("MAC hôte: %02x:%02x:%02x:%02x:%02x:%02x", my_mac[0], my_mac[1], my_mac[2], my_mac[3], my_mac[4], my_mac[5]);
 
-    if ((utun_fd = utun_open()) < 0) goto out;
+    if ((utun_fd = request_utun()) < 0) goto out;
     struct lease L;
     LOG("DHCP en cours sur %s…", utun_name);
     if (dhcp_acquire(&L) < 0) { LOG("Pas de réponse DHCP du téléphone"); goto out; }
+    if (!L.srv) L.srv = L.gw;                                 /* serveur sans option 54 : on suppose le routeur */
     my_ip = L.ip; gw_ip = L.gw; srv_ip = L.srv; memcpy(gw_mac, L.srvmac, 6);
-    renew_period = L.secs >= 120 ? L.secs / 2 : 60;
+    pthread_mutex_lock(&dhcp_lock);
+    dhcp_client_bound(&dhcp_c, &L, now_s());
+    dhcp_active = 1;
+    pthread_mutex_unlock(&dhcp_lock);
     char a[16], g[16], d[16];
     ipstr(L.ip, a); ipstr(L.gw, g); ipstr(L.dns, d);
     LOG("%s: IP %s, passerelle %s, DNS %s, bail %us", utun_name, a, g, L.dns ? d : "-", L.secs);
-    configure_iface(&L);
+    if (request_config4(&L) < 0) { LOG("Le superviseur a refusé la configuration réseau"); goto out; }
 
     pthread_t t_rx, t_tx, t_ct;
     pthread_create(&t_rx, NULL, rx_thread, NULL);
@@ -886,7 +1123,6 @@ static int session(void) {
     }
     LOG("Arrêt…");
     pthread_join(t_rx, NULL); pthread_join(t_tx, NULL); pthread_join(t_ct, NULL);
-    unconfigure_iface();
     rc = 0;
 out:
     if (utun_fd >= 0) close(utun_fd);
