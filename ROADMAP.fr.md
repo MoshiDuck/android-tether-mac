@@ -101,7 +101,7 @@ Critères, tous obligatoires :
 3. **Signé et notarisé** par Apple (Developer ID), distribué en installateur notarisé en plus de Homebrew.
 4. **Tests d'intégration sans matériel** avec `main.c` ≥ 80 % des lignes, et fuzzing planifié.
 5. Trois mois sans bogue grave connu.
-6. Documentation complète : installation, dépannage (`--diagnose`), architecture, modèle de sécurité.
+6. Documentation complète : installation, dépannage (`--diagnose`, ✅ `docs/troubleshooting.fr.md`), architecture, modèle de sécurité.
 
 ---
 

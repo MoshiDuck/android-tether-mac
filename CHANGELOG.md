@@ -16,6 +16,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - A router advertisement with a router lifetime of 0 (not a default router) is no longer used to configure IPv6.
 
 ### Added
+- **Troubleshooting guide** (`docs/troubleshooting.md`, in French `docs/troubleshooting.fr.md`): what each line of the `--diagnose` diagnosis and of the log means, and what to do.
 - **IPv6 prefix change.** When the router stops announcing the prefix we use and announces another one, the supervisor removes the address, the service and the routes (leak guard back) and the next advertisement installs the new prefix, instead of keeping an address that no longer works.
 - **Clear `adb` problems.** Before switching the phone to USB tethering, the supervisor reads `adb devices` and logs once what to do when adb is missing, no phone is seen, the phone has not authorised the Mac, it is offline or in an unexpected state, or several devices are ready. The new `-S serial` option picks the right phone (`adb -s`). Serial numbers and the user name are validated before they reach a command.
 - **MTU announced by the phone.** The DHCP request now asks for option 26, and the MTU option of the IPv6 router advertisement is read. The smaller value is applied to the interface by the supervisor, which validates it (576 to 1500 for IPv4, 1280 to 1500 for IPv6; never above 1500). The requests `CONFIG4` and `CONFIG6` carry an optional two-byte MTU. Tested with forged values; the S24 Ultra announces no MTU, so no real phone has exercised it yet.
