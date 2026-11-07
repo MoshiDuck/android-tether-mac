@@ -597,6 +597,63 @@ static void test_log_rotation(void) {
     CHECK(system(cmd) == 0);
 }
 
+/* ---------- veille du Mac ---------- */
+static void test_wake_pure(void) {
+    CHECK(!wake_detected(100, 100, WAKE_GAP_S));
+    CHECK(!wake_detected(101, 100, WAKE_GAP_S));                                    /* un tour normal : environ 1 s */
+    CHECK(!wake_detected(100 + WAKE_GAP_S - 1, 100, WAKE_GAP_S));                   /* juste en dessous du seuil */
+    CHECK(wake_detected(100 + WAKE_GAP_S, 100, WAKE_GAP_S));                        /* au seuil */
+    CHECK(wake_detected(100000, 100, WAKE_GAP_S));
+    CHECK(!wake_detected(50, 100, WAKE_GAP_S));                                     /* horloge qui recule : jamais */
+    CHECK(!wake_detected(100000, 100, 0));                                          /* 0 : désactivé */
+}
+
+static int64_t clock_jump_s;
+static void *clock_jumper(void *a) {                                                /* simule une veille : l'horloge saute */
+    (void)a;
+    usleep(1500000);
+    test_clock_offset += clock_jump_s;
+    return NULL;
+}
+
+static void test_wake_functional(void) {
+    sup_reset();
+    pthread_t th;
+    int rc;
+    char *t;
+
+    test_worker_entry = fake_silent_worker;                                         /* le Mac dort 100 s : la session est relancée */
+    clock_jump_s = 100;
+    time_t t0 = time(NULL);
+    pthread_create(&th, NULL, clock_jumper, NULL);
+    t = run_capturing_stderr(&rc);
+    pthread_join(th, NULL);
+    CHECK(time(NULL) - t0 <= 8);                                                    /* tué à la détection, pas après 30 s */
+    CHECK(rc == 1);
+    CHECK(strstr(t, "Réveil du Mac détecté (environ 10") != NULL);                  /* 100 s, plus le tour en cours */
+    CHECK(strstr(t, "signe de vie") == NULL);                                       /* c'est bien la veille, pas le chien de garde */
+    free(t);
+
+    test_worker_entry = fake_chatty_worker;                                         /* un saut de 10 s : pas une veille */
+    clock_jump_s = 10;
+    pthread_create(&th, NULL, clock_jumper, NULL);
+    t = run_capturing_stderr(&rc);
+    pthread_join(th, NULL);
+    CHECK(rc == 0);
+    CHECK(strstr(t, "Réveil") == NULL);
+    free(t);
+
+    wake_gap_s = 2;                                                                 /* sans saut d'horloge, un worker qui dure 3 s n'est pas un réveil */
+    test_worker_entry = fake_chatty_worker;
+    t = run_capturing_stderr(&rc);
+    CHECK(rc == 0 && strstr(t, "Réveil") == NULL);
+    free(t);
+    wake_gap_s = WAKE_GAP_S;
+
+    test_worker_entry = NULL;
+    sup_reset();
+}
+
 /* Signe de vie du worker : un message STATUS identique au précédent, au plus toutes les 10 s. */
 static void test_worker_heartbeat(void) {
     int sv[2];
@@ -825,6 +882,8 @@ static void run_supervisor_tests(void) {
     test_watchdog_pure();
     test_worker_heartbeat();
     test_worker_log_pipe();
+    test_wake_pure();
+    test_wake_functional();
     test_log_rotation();
     test_watchdog_functional();
     test_sup_status();
