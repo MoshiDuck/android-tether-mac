@@ -44,6 +44,15 @@ int policy_check_overlap(uint32_t ip, uint32_t mask, uint32_t other_ip, uint32_t
 /* Texte d'état affiché par l'icône : "waiting", "connecting" ou "connected <ipv4> utun<N>". */
 int policy_check_status(const char *text, size_t len);
 
+/* Limitation de débit des demandes du worker : au plus `max` demandes par fenêtre de `window` secondes. */
+struct rate_limit {
+    int64_t window_start;
+    int count;
+};
+
+/* 1 si la demande est acceptée, 0 si la limite est dépassée. `now` est une horloge monotone en secondes. */
+int rate_allow(struct rate_limit *r, int64_t now, int max, int window);
+
 const char *policy_strerror(int err);
 
 #endif

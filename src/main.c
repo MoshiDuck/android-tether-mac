@@ -896,6 +896,8 @@ static void usage(const char *p) {
 static int cfg4_done, cfg6_done;        /* configuration déjà appliquée pour le worker courant */
 static time_t last_adb_run;
 static int allow_overlap;               /* -O : accepte un sous-réseau qui recouvre un réseau existant */
+#define IPC_RATE_MAX 30                 /* un worker normal fait moins de dix demandes par session */
+#define IPC_RATE_WINDOW 10              /* secondes */
 
 /* Réseaux IPv4 actuellement connectés au Mac (hors boucle locale et hors notre interface utun). */
 struct connected_net { uint32_t ip, mask; };
@@ -1077,6 +1079,7 @@ static int run_worker_once(unsigned vid, unsigned pid, uid_t uid, gid_t gid) {
     close(sv[1]);
     utun_fd = -1; cfg4_done = cfg6_done = 0; my_ip = gw_ip = 0;
     v6_routes = v6_svc = 0;
+    struct rate_limit rl = {0, 0};
 
     for (;;) {
         struct ipc_msg m;
@@ -1084,6 +1087,11 @@ static int run_worker_once(unsigned vid, unsigned pid, uid_t uid, gid_t gid) {
         int r = ipc_recv(sv[0], &m, &fd, 1000);
         if (r == 1) {
             if (fd >= 0) close(fd);                                  /* un worker n'a aucune raison de nous passer un descripteur */
+            if (!rate_allow(&rl, now_s(), IPC_RATE_MAX, IPC_RATE_WINDOW)) {
+                LOG("Le worker envoie trop de demandes (plus de %d en %d s) : arrêt du worker", IPC_RATE_MAX, IPC_RATE_WINDOW);
+                kill(child, SIGKILL);
+                break;
+            }
             handle_request(sv[0], &m);
         } else if (r < 0) {
             break;                                                   /* worker disparu ou message invalide */

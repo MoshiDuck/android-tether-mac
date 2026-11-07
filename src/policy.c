@@ -46,6 +46,16 @@ int policy_check_overlap(uint32_t ip, uint32_t mask, uint32_t other_ip, uint32_t
     return policy_subnets_overlap(ip, mask, other_ip, other_mask) ? POLICY_OVERLAP : POLICY_OK;
 }
 
+int rate_allow(struct rate_limit *r, int64_t now, int max, int window) {
+    if (r->count == 0 || now < r->window_start || now - r->window_start >= window) {
+        r->window_start = now;                      /* nouvelle fenêtre (ou horloge qui a reculé) */
+        r->count = 0;
+    }
+    if (r->count >= max) return 0;
+    r->count++;
+    return 1;
+}
+
 int policy_check_v6(const uint8_t addr[16], const uint8_t router[16]) {
     int global = (addr[0] & 0xe0) == 0x20;          /* 2000::/3 */
     int ula = (addr[0] & 0xfe) == 0xfc;             /* fc00::/7 */
