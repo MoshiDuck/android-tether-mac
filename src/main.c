@@ -80,7 +80,9 @@ static uint32_t my_ip, gw_ip; /* network order */
 static uint32_t req_counter = 1;
 static pthread_mutex_t tx_lock = PTHREAD_MUTEX_INITIALIZER;
 
-static void logf_(const char *fmt, ...) {
+#define PRINTF_LIKE(f, a) __attribute__((format(printf, f, a)))
+
+PRINTF_LIKE(1, 2) static void logf_(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     vfprintf(stderr, fmt, ap);
@@ -118,7 +120,7 @@ static void status_write(void) {
     rename(STATUS_FILE ".tmp", STATUS_FILE);
 }
 
-static void set_status(const char *fmt, ...) {
+PRINTF_LIKE(1, 2) static void set_status(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(status_text, sizeof status_text, fmt, ap);
@@ -136,7 +138,10 @@ static void status_tick(const char *text) {
 
 /* ---------- RNDIS control channel ---------- */
 static int ctrl_send(const uint8_t *msg, size_t len) {
-    return libusb_control_transfer(h, 0x21, CDC_SEND_ENCAPSULATED, 0, ctrl_if, (uint8_t *)msg, len, 1000);
+    uint8_t buf[256];                                 /* libusb veut un tampon non const, même en émission */
+    if (len > sizeof buf) return LIBUSB_ERROR_INVALID_PARAM;
+    memcpy(buf, msg, len);
+    return libusb_control_transfer(h, 0x21, CDC_SEND_ENCAPSULATED, 0, ctrl_if, buf, len, 1000);
 }
 
 static void answer_keepalive(const uint8_t *req) {
@@ -316,7 +321,7 @@ static int utun_open(void) {
     return fd;
 }
 
-static void sh(const char *fmt, ...) {
+PRINTF_LIKE(1, 2) static void sh(const char *fmt, ...) {
     char cmd[256];
     va_list ap;
     va_start(ap, fmt);

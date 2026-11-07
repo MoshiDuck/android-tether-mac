@@ -14,21 +14,55 @@ concurrency:
 
 jobs:
   build-and-test:
-    runs-on: macos-latest
+    name: Build and test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, macos-15]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Install dependencies
-        run: brew install libusb pkgconf shellcheck
+        run: brew install libusb pkgconf
 
-      - name: Build driver (warnings are errors)
-        run: make CFLAGS="-O2 -Wall -Wextra -Werror"
+      - name: Strict warnings (all warnings are errors)
+        run: make strict
 
-      - name: Unit and fuzz tests (ASan + UBSan)
+      - name: Build driver
+        run: make
+
+      - name: Unit, state-machine and fuzz tests (ASan + UBSan)
         run: make test
 
       - name: Build menu bar app
         run: menubar/build.sh
 
+  quality:
+    name: Static analysis, coverage, lint
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: brew install libusb pkgconf shellcheck actionlint
+
+      - name: Clang static analyzer
+        run: make analyze
+
+      - name: Coverage report and thresholds
+        run: |
+          make coverage | tee coverage.txt
+          scripts/check-coverage.sh coverage.txt dhcp.c=95 TOTAL=35
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.txt
+
       - name: Lint shell scripts
-        run: shellcheck install.sh uninstall.sh menubar/build.sh scripts/release.sh
+        run: shellcheck install.sh uninstall.sh menubar/build.sh scripts/*.sh
+
+      - name: Lint workflows
+        run: actionlint
