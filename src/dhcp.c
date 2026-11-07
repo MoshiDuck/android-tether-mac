@@ -75,6 +75,25 @@ int dhcp_build_renew(uint8_t *f, const uint8_t mac[6], uint32_t xid, uint32_t ip
     return finish_frame(f, blen, ip, unicast ? srv_ip : 0xffffffffu);
 }
 
+int dhcp_build_release(uint8_t *f, const uint8_t mac[6], uint32_t xid, uint32_t ip,
+                       const uint8_t srv_mac[6], uint32_t srv_ip) {
+    memset(f, 0, 600);
+    memcpy(f, srv_mac, 6); memcpy(f + 6, mac, 6); putbe16(f + 12, 0x0800);
+    uint8_t *b = f + 14 + 20 + 8;
+    b[0] = 1; b[1] = 1; b[2] = 6;
+    putbe32(b + 4, xid);
+    memcpy(b + 12, &ip, 4);                       /* ciaddr : l'adresse que l'on rend */
+    memcpy(b + 28, mac, 6);
+    memcpy(b + 236, dhcp_cookie, 4);
+    uint8_t *o = b + 240;
+    *o++ = 53; *o++ = 1; *o++ = 7;                /* DHCPRELEASE */
+    *o++ = 54; *o++ = 4; memcpy(o, &srv_ip, 4); o += 4;
+    *o++ = 255;
+    int blen = o - b;
+    if (blen < 300) blen = 300;
+    return finish_frame(f, blen, ip, srv_ip);
+}
+
 int dhcp_parse(const uint8_t *f, int len, const uint8_t mac[6], uint32_t xid, struct lease *L) {
     if (len < 14 + 20 + 8 + 240 || f[12] != 0x08 || f[13] != 0x00) return -1;
     const uint8_t *ip = f + 14;

@@ -847,6 +847,24 @@ static int find_device(uint16_t vid, uint16_t pid) {
 
 static int session(void);
 
+/* Fin d'une session normale : rend le bail au serveur (RFC 2131 §3.1.7) pour ne pas laisser une adresse
+ * orpheline dans son pool. Retourne 0 s'il n'y avait rien à rendre, 1 si c'est fait, -1 si l'envoi a échoué
+ * (par exemple parce que le téléphone a été débranché). */
+static int release_lease(void) {
+    struct dhcp_client c;
+    int active;
+    pthread_mutex_lock(&dhcp_lock);
+    c = dhcp_c;
+    active = dhcp_active;
+    dhcp_active = 0;                                        /* plus aucun renouvellement après le rendu */
+    pthread_mutex_unlock(&dhcp_lock);
+    if (!active || c.state == DHCP_EXPIRED || !c.ip || !c.srv) return 0;
+    uint8_t f[700];
+    if (send_frame(f, dhcp_build_release(f, my_mac, arc4random() | 1, c.ip, c.srvmac, c.srv)) != 0) return -1;
+    LOG("DHCP: bail rendu au serveur");
+    return 1;
+}
+
 /* Bascule le téléphone en RNDIS via adb, exécuté en tant qu'utilisateur appelant sudo
  * (ses clés ADB et son PATH, pas ceux de root). */
 static void adb_enable(void) {
@@ -1131,6 +1149,7 @@ static int session(void) {
     }
     LOG("Arrêt…");
     pthread_join(t_rx, NULL); pthread_join(t_tx, NULL); pthread_join(t_ct, NULL);
+    release_lease();
     rc = 0;
 out:
     if (utun_fd >= 0) close(utun_fd);

@@ -69,6 +69,27 @@ static void test_renew_frames(void) {
     CHECK(opt(f, n, 50) == NULL && opt(f, n, 54) == NULL);
 }
 
+/* ---------- DHCPRELEASE ---------- */
+static void test_release_frame(void) {
+    uint32_t me = ip4(10, 217, 123, 144), srv = ip4(10, 217, 123, 221);
+    uint8_t f[700];
+    int n = dhcp_build_release(f, MAC, 0xBEEF0001u, me, SRV_MAC, srv);
+    CHECK(!memcmp(f, SRV_MAC, 6) && !memcmp(f + 6, MAC, 6));                   /* unicast vers le serveur */
+    const uint8_t *ip = f + 14, *udp = ip + 20, *b = udp + 8;
+    CHECK(ip[0] == 0x45 && ip[9] == 17 && ip_csum(ip, 20) == 0);
+    CHECK(!memcmp(ip + 12, &me, 4) && !memcmp(ip + 16, &srv, 4));
+    CHECK((udp[0] << 8 | udp[1]) == 68 && (udp[2] << 8 | udp[3]) == 67);
+    CHECK(b[0] == 1 && be32(b + 4) == 0xBEEF0001u);
+    CHECK(!memcmp(b + 12, &me, 4));                                            /* ciaddr = l'adresse rendue */
+    CHECK(!memcmp(b + 28, MAC, 6) && !memcmp(b + 236, dhcp_cookie, 4));
+    const uint8_t *t = opt(f, n, 53);
+    CHECK(t && t[2] == 7);                                                     /* DHCPRELEASE */
+    const uint8_t *s = opt(f, n, 54);
+    CHECK(s && s[1] == 4 && !memcmp(s + 2, &srv, 4));                          /* identifiant du serveur */
+    CHECK(opt(f, n, 50) == NULL && opt(f, n, 55) == NULL);                     /* ni adresse demandée ni liste de paramètres */
+    CHECK(n >= 14 + 20 + 8 + 300);
+}
+
 /* ---------- options T1 / T2 ---------- */
 static int make_reply(uint8_t *f, uint8_t type, uint32_t xid, const uint8_t *opts, int optlen) {
     dhcp_build(f, MAC, 1, xid, 0, 0);
@@ -254,6 +275,7 @@ static void test_state_machine_fuzz(void) {
 
 void run_dhcp_tests(void) {
     test_renew_frames();
+    test_release_frame();
     test_parse_t1_t2();
     test_timers();
     test_renew_cycle();

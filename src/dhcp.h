@@ -33,6 +33,10 @@ int dhcp_build(uint8_t *f, const uint8_t mac[6], uint8_t type, uint32_t xid, uin
 int dhcp_build_renew(uint8_t *f, const uint8_t mac[6], uint32_t xid, uint32_t ip,
                      const uint8_t srv_mac[6], uint32_t srv_ip, int unicast);
 
+/* DHCPRELEASE (RFC 2131 §3.1.7) : rend le bail au serveur, en unicast, avec ciaddr et l'identifiant du serveur. */
+int dhcp_build_release(uint8_t *f, const uint8_t mac[6], uint32_t xid, uint32_t ip,
+                       const uint8_t srv_mac[6], uint32_t srv_ip);
+
 /* Analyse une réponse serveur (OFFER/ACK/NAK) adressée à mac avec ce xid. 0 si valide, -1 sinon. */
 int dhcp_parse(const uint8_t *f, int len, const uint8_t mac[6], uint32_t xid, struct lease *L);
 
