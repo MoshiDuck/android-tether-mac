@@ -530,6 +530,122 @@ static void test_handle_ipv6(void) {
     CHECK(1);
 }
 
+/* MTU annoncé par le téléphone : option 26 du bail DHCP, option 5 des annonces de routeur. */
+static void put_mtu_opt(uint8_t *o, uint32_t mtu) {
+    memset(o, 0, 8);
+    o[0] = 5; o[1] = 1;
+    putbe32(o + 4, mtu);
+}
+
+static void test_ra_mtu(void) {
+    uint8_t f[300], opts[64];
+    struct ra r;
+    put_mtu_opt(opts, 1400);
+    int n = make_ra(f, opts, 8);
+    CHECK(parse_ra(f, n, &r) == 0 && r.mtu == 1400 && !r.have_prefix);
+    put_mtu_opt(opts, 70000);                                                 /* absurde : plafonné, jamais de débordement */
+    n = make_ra(f, opts, 8);
+    CHECK(parse_ra(f, n, &r) == 0 && r.mtu == 0xffff);
+    put_mtu_opt(opts, 1400); put_prefix_opt(opts + 8, 64, 0xC0, 3600);        /* avec un préfixe */
+    n = make_ra(f, opts, 40);
+    CHECK(parse_ra(f, n, &r) == 0 && r.mtu == 1400 && r.have_prefix);
+    put_mtu_opt(opts, 1400); put_mtu_opt(opts + 8, 1300);                     /* deux options : la première compte */
+    n = make_ra(f, opts, 16);
+    CHECK(parse_ra(f, n, &r) == 0 && r.mtu == 1400);
+    memset(opts, 0, 8); opts[0] = 5; opts[1] = 0;                             /* longueur 0 : jamais lue */
+    n = make_ra(f, opts, 8);
+    CHECK(parse_ra(f, n, &r) == 0 && r.mtu == 0);
+    n = make_ra(f, (uint8_t[]){5, 1, 0, 0}, 4);                               /* option tronquée */
+    CHECK(parse_ra(f, n, &r) == 0 && r.mtu == 0);
+
+    /* ra_apply retient le MTU seulement s'il est utile : entre 1280 et 1499 */
+    uint8_t px[64];
+    int64_t now = 1000;
+    struct { uint32_t mtu; unsigned want; } cases[] = {{1400, 1400}, {1280, 1280}, {1279, 0}, {1500, 0}, {9000, 0}, {0, 0}};
+    for (size_t k = 0; k < sizeof cases / sizeof cases[0]; k++) {
+        v6_claimed = v6_pending = v6_withdraw = 0; v6_expire = 0; v6_mtu = 77;
+        put_prefix_opt(px, 64, 0xC0, 3600);
+        if (cases[k].mtu) put_mtu_opt(px + 32, cases[k].mtu);
+        n = make_ra(f, px, cases[k].mtu ? 40 : 32);
+        CHECK(parse_ra(f, n, &r) == 0);
+        ra_apply(&r, now);
+        CHECK(v6_claimed && v6_mtu == cases[k].want);
+    }
+    v6_claimed = v6_pending = v6_withdraw = 0; v6_expire = 0; v6_mtu = 0;
+}
+
+static void test_lease_mtu(void) {
+    struct lease L;
+    memset(&L, 0, sizeof L);
+    CHECK(lease_mtu(&L) == 0);                                                /* absent : rien à changer */
+    L.mtu = 1400; CHECK(lease_mtu(&L) == 1400);
+    L.mtu = 1500; CHECK(lease_mtu(&L) == 0);                                  /* déjà la valeur par défaut */
+    L.mtu = 9000; CHECK(lease_mtu(&L) == 0);                                  /* plafonné à 1500 : rien à changer */
+    L.mtu = 576;  CHECK(lease_mtu(&L) == 576);
+    L.mtu = 500;  CHECK(lease_mtu(&L) == 0);                                  /* trop petit : ignoré (et signalé) */
+}
+
+/* Côté worker : le MTU de l'interface n'est abaissé qu'une fois la demande acceptée par le superviseur. */
+static void test_worker_mtu_requests(void) {
+    int sv[2];
+    CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    int saved_sock = ipc_sock;
+    ipc_sock = sv[0];
+    worker_mode = 1;
+    struct ipc_msg ok, refused, got;
+    memset(&ok, 0, sizeof ok); ok.type = IPC_REPLY;
+    refused = ok; refused.status = POLICY_BAD_MTU;
+
+    struct lease L;
+    memset(&L, 0, sizeof L);
+    L.ip = 1; L.gw = 2; L.mask = 3; L.dns = 4; L.mtu = 1400;
+    cur_mtu = MTU;
+    CHECK(ipc_send(sv[1], &refused, -1) == 0);                               /* refusée : on garde 1500 */
+    CHECK(request_config4(&L) == -1 && cur_mtu == MTU);
+    CHECK(ipc_recv(sv[1], &got, NULL, 100) == 1 && got.type == IPC_REQ_CONFIG4 && got.len == 18);
+    CHECK(((got.data[16] << 8) | got.data[17]) == 1400);
+
+    CHECK(ipc_send(sv[1], &ok, -1) == 0);                                    /* acceptée : 1400 */
+    CHECK(request_config4(&L) == 0 && cur_mtu == 1400);
+    CHECK(ipc_recv(sv[1], &got, NULL, 100) == 1 && got.len == 18);
+
+    cur_mtu = MTU; L.mtu = 0;                                                /* pas de MTU : message de 16 octets, rien ne change */
+    CHECK(ipc_send(sv[1], &ok, -1) == 0);
+    CHECK(request_config4(&L) == 0 && cur_mtu == MTU);
+    CHECK(ipc_recv(sv[1], &got, NULL, 100) == 1 && got.len == 16);
+
+    memcpy(v6_addr, (uint8_t[]){0x26, 0, 3, 0x83}, 4); memset(v6_router, 0, 16);
+    cur_mtu = 1450; v6_mtu = 1300;                                           /* IPv6 plus petit : le plus petit gagne */
+    CHECK(ipc_send(sv[1], &ok, -1) == 0);
+    request_config6();
+    CHECK(cur_mtu == 1300);
+    CHECK(ipc_recv(sv[1], &got, NULL, 100) == 1 && got.type == IPC_REQ_CONFIG6 && got.len == 34);
+    CHECK(((got.data[32] << 8) | got.data[33]) == 1300);
+
+    cur_mtu = 1200; v6_mtu = 1300;                                           /* IPv6 plus grand : on ne remonte pas */
+    CHECK(ipc_send(sv[1], &ok, -1) == 0);
+    request_config6();
+    CHECK(cur_mtu == 1200);
+    CHECK(ipc_recv(sv[1], &got, NULL, 100) == 1);
+
+    cur_mtu = 1450; v6_mtu = 1300;                                           /* refusée : rien ne change */
+    CHECK(ipc_send(sv[1], &refused, -1) == 0);
+    request_config6();
+    CHECK(cur_mtu == 1450);
+    CHECK(ipc_recv(sv[1], &got, NULL, 100) == 1);
+
+    cur_mtu = 1450; v6_mtu = 0;                                              /* pas de MTU IPv6 : message de 32 octets */
+    CHECK(ipc_send(sv[1], &ok, -1) == 0);
+    request_config6();
+    CHECK(cur_mtu == 1450);
+    CHECK(ipc_recv(sv[1], &got, NULL, 100) == 1 && got.len == 32);
+
+    worker_mode = 0;
+    ipc_sock = saved_sock;
+    close(sv[0]); close(sv[1]);
+    cur_mtu = MTU; v6_mtu = 0;
+}
+
 /* Cycle de vie de l'IPv6 obtenu : prise en compte, prolongation, retrait annoncé, expiration. */
 static void set_router_lifetime(uint8_t *f, uint16_t secs) { putbe16(f + 14 + 40 + 6, secs); }
 
@@ -665,6 +781,9 @@ int main(void) {
     test_parse_ra();
     test_handle_ipv6();
     test_ra_lifecycle();
+    test_ra_mtu();
+    test_lease_mtu();
+    test_worker_mtu_requests();
     test_renew_ack();
     test_release_lease();
     run_dhcp_tests();

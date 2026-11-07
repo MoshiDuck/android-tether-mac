@@ -60,6 +60,7 @@ static void sup_reset(void) {
     my_ip = gw_ip = 0;
     v6_routes = v6_svc = dns_applied = 0;
     v6_blocked = allow_v6_leak = 0;
+    iface_mtu = MTU; cur_mtu = MTU; v6_mtu = 0;
     want_route = 1; ipv6_on = 1; auto_adb = 0; last_adb_run = 0; adb_user = NULL;
     worker_mode = 0; quit = 0; running = 1;
     snprintf(status_text, sizeof status_text, "starting");
@@ -684,6 +685,75 @@ static void test_worker_heartbeat(void) {
     snprintf(status_text, sizeof status_text, "starting");
 }
 
+/* MTU : appliqué par le superviseur après validation, jamais au-delà de 1500 ni en dessous du minimum. */
+static void test_sup_mtu(void) {
+    struct ipc_msg rp;
+    int fd = -1;
+    uint8_t d4[20] = {0}, d6[36] = {0};                              /* un peu plus grands : on teste aussi des longueurs fausses */
+    memcpy(d4, CFG4_OK, 16);
+    memcpy(d6, GLOBAL6, 16); memcpy(d6 + 16, ROUTER6, 16);
+
+    sup_reset();                                                    /* sans MTU : 1500, comme avant */
+    sup_utun();
+    CHECK(sup_call(msg(IPC_REQ_CONFIG4, CFG4_OK, 16), &rp, &fd) == 1 && rp.status == 0);
+    CHECK(cmd_has("netmask 255.255.255.0 mtu 1500 up") && iface_mtu == 1500);
+
+    sup_reset();                                                    /* MTU du téléphone : appliqué */
+    sup_utun();
+    d4[16] = 1400 >> 8; d4[17] = 1400 & 0xff;
+    CHECK(sup_call(msg(IPC_REQ_CONFIG4, d4, 18), &rp, &fd) == 1 && rp.status == 0);
+    CHECK(cmd_has("netmask 255.255.255.0 mtu 1400 up") && iface_mtu == 1400);
+
+    unsigned bad[] = {0, 575, 1501, 9000, 65535};                   /* valeurs hostiles : refusées, rien n'est exécuté */
+    for (size_t k = 0; k < sizeof bad / sizeof bad[0]; k++) {
+        sup_reset();
+        sup_utun();
+        d4[16] = (uint8_t)(bad[k] >> 8); d4[17] = (uint8_t)(bad[k] & 0xff);
+        CHECK(sup_call(msg(IPC_REQ_CONFIG4, d4, 18), &rp, &fd) == 1 && rp.status == POLICY_BAD_MTU);
+        CHECK(ncmds == 0 && !cfg4_done);
+    }
+    sup_reset();
+    sup_utun();
+    d4[16] = 1400 >> 8; d4[17] = 1400 & 0xff;
+    CHECK(sup_call(msg(IPC_REQ_CONFIG4, d4, 17), &rp, &fd) == 1 && rp.status == 200);   /* longueur inattendue */
+    CHECK(sup_call(msg(IPC_REQ_CONFIG4, d4, 19), &rp, &fd) == 1 && rp.status == 200);
+    CHECK(ncmds == 0);
+
+    sup_reset();                                                    /* IPv6 : le plus petit des deux MTU */
+    sup_utun();
+    CHECK(sup_call(msg(IPC_REQ_CONFIG4, CFG4_OK, 16), &rp, &fd) == 1 && rp.status == 0);
+    ncmds = 0;
+    d6[32] = 1300 >> 8; d6[33] = 1300 & 0xff;
+    CHECK(sup_call(msg(IPC_REQ_CONFIG6, d6, 34), &rp, &fd) == 1 && rp.status == 0);
+    CHECK(cmd_has("/sbin/ifconfig utun99 mtu 1300") && iface_mtu == 1300);
+
+    sup_reset();                                                    /* IPv6 plus grand que l'IPv4 : on ne remonte pas */
+    sup_utun();
+    d4[16] = 1280 >> 8; d4[17] = 1280 & 0xff;
+    CHECK(sup_call(msg(IPC_REQ_CONFIG4, d4, 18), &rp, &fd) == 1 && rp.status == 0 && iface_mtu == 1280);
+    ncmds = 0;
+    d6[32] = 1400 >> 8; d6[33] = 1400 & 0xff;
+    CHECK(sup_call(msg(IPC_REQ_CONFIG6, d6, 34), &rp, &fd) == 1 && rp.status == 0);
+    CHECK(!cmd_has("mtu 1400") && iface_mtu == 1280);
+
+    unsigned bad6[] = {0, 1279, 1501, 65535};
+    for (size_t k = 0; k < sizeof bad6 / sizeof bad6[0]; k++) {
+        sup_reset();
+        sup_utun();
+        CHECK(sup_call(msg(IPC_REQ_CONFIG4, CFG4_OK, 16), &rp, &fd) == 1 && rp.status == 0);
+        ncmds = 0;
+        d6[32] = (uint8_t)(bad6[k] >> 8); d6[33] = (uint8_t)(bad6[k] & 0xff);
+        CHECK(sup_call(msg(IPC_REQ_CONFIG6, d6, 34), &rp, &fd) == 1 && rp.status == (bad6[k] == 0 ? 0 : POLICY_BAD_MTU));
+        CHECK(bad6[k] == 0 ? cfg6_done : (!cfg6_done && ncmds == 0));            /* 0 = « aucun MTU » : accepté tel quel */
+    }
+    sup_reset();
+    sup_utun();
+    CHECK(sup_call(msg(IPC_REQ_CONFIG4, CFG4_OK, 16), &rp, &fd) == 1 && rp.status == 0);
+    CHECK(sup_call(msg(IPC_REQ_CONFIG6, d6, 33), &rp, &fd) == 1 && rp.status == 200);   /* longueur inattendue */
+    CHECK(sup_call(msg(IPC_REQ_CONFIG6, d6, 35), &rp, &fd) == 1 && rp.status == 200);
+    sup_reset();
+}
+
 static void test_sup_status(void) {
     sup_reset();
     struct ipc_msg rp;
@@ -877,6 +947,7 @@ static void run_supervisor_tests(void) {
     test_sup_overlap();
     test_sup_ipv6_leak_guard();
     test_sup_config6();
+    test_sup_mtu();
     test_sup_deconfig6();
     test_worker_limits();
     test_watchdog_pure();

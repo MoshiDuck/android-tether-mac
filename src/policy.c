@@ -56,6 +56,16 @@ int rate_allow(struct rate_limit *r, int64_t now, int max, int window) {
     return 1;
 }
 
+int policy_check_mtu(unsigned mtu, int ipv6) {
+    unsigned min = ipv6 ? POLICY_MTU_MIN6 : POLICY_MTU_MIN4;
+    return mtu >= min && mtu <= POLICY_MTU_MAX ? POLICY_OK : POLICY_BAD_MTU;
+}
+
+unsigned policy_mtu_from_peer(unsigned raw, unsigned min) {
+    if (raw < min) return 0;
+    return raw > POLICY_MTU_MAX ? POLICY_MTU_MAX : raw;
+}
+
 int policy_check_v6(const uint8_t addr[16], const uint8_t router[16]) {
     int global = (addr[0] & 0xe0) == 0x20;          /* 2000::/3 */
     int ula = (addr[0] & 0xfe) == 0xfc;             /* fc00::/7 */
@@ -106,6 +116,7 @@ const char *policy_strerror(int err) {
     case POLICY_BAD_V6_ROUTER: return "routeur IPv6 refusé";
     case POLICY_BAD_STATUS: return "état refusé";
     case POLICY_OVERLAP: return "sous-réseau déjà utilisé par ce Mac";
+    case POLICY_BAD_MTU: return "MTU refusé";
     default: return "erreur inconnue";
     }
 }

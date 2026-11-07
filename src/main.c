@@ -69,6 +69,9 @@
 #define RNDIS_HDR               44
 #define RX_BUF                  32768
 #define MTU                     1500
+static int cur_mtu = MTU;               /* worker : MTU de l'interface (celui du téléphone s'il en annonce un plus petit) */
+static int iface_mtu = MTU;             /* superviseur : MTU appliqué à l'interface */
+static unsigned v6_mtu;                 /* worker : MTU annoncé dans la RA (0 si absent) */
 
 #define CDC_SEND_ENCAPSULATED   0x00
 #define CDC_GET_ENCAPSULATED    0x01
@@ -188,16 +191,33 @@ static int request_utun(void) {
     return fd;
 }
 
+/* MTU annoncé par le téléphone (DHCP option 26) : utilisé s'il est plausible, sinon on garde 1500. */
+static unsigned lease_mtu(const struct lease *L) {
+    unsigned m = policy_mtu_from_peer(L->mtu, POLICY_MTU_MIN4);
+    if (L->mtu && !m) LOG("DHCP: MTU %u annoncé par le téléphone ignoré (trop petit)", (unsigned)L->mtu);
+    return m && m < MTU ? m : 0;                                      /* 0 : rien à changer */
+}
+
 static int request_config4(const struct lease *L) {
-    uint8_t d[16];
+    uint8_t d[18];
+    unsigned m = lease_mtu(L);
     memcpy(d, &L->ip, 4); memcpy(d + 4, &L->gw, 4); memcpy(d + 8, &L->mask, 4); memcpy(d + 12, &L->dns, 4);
-    return ipc_call(IPC_REQ_CONFIG4, d, sizeof d, NULL, NULL, 30000) == 0 ? 0 : -1;
+    putbe16(d + 16, (uint16_t)m);
+    if (ipc_call(IPC_REQ_CONFIG4, d, m ? 18 : 16, NULL, NULL, 30000) != 0) return -1;
+    if (m) { __atomic_store_n(&cur_mtu, (int)m, __ATOMIC_RELAXED); LOG("MTU de l'interface : %u (annoncé par le téléphone)", m); }
+    return 0;
 }
 
 static void request_config6(void) {
-    uint8_t d[32];
+    uint8_t d[34];
     memcpy(d, v6_addr, 16); memcpy(d + 16, v6_router, 16);
-    if (ipc_call(IPC_REQ_CONFIG6, d, sizeof d, NULL, NULL, 30000) > 0) LOG("IPv6: configuration refusée par le superviseur");
+    putbe16(d + 32, (uint16_t)v6_mtu);
+    int r = ipc_call(IPC_REQ_CONFIG6, d, v6_mtu ? 34 : 32, NULL, NULL, 30000);
+    if (r > 0) { LOG("IPv6: configuration refusée par le superviseur"); return; }
+    if (r == 0 && v6_mtu && (int)v6_mtu < __atomic_load_n(&cur_mtu, __ATOMIC_RELAXED)) {
+        __atomic_store_n(&cur_mtu, (int)v6_mtu, __ATOMIC_RELAXED);
+        LOG("MTU de l'interface : %u (annoncé dans l'annonce de routeur IPv6)", v6_mtu);
+    }
 }
 
 static void request_deconfig6(void) {
@@ -529,7 +549,7 @@ static void dns_apply(const struct lease *L) {
 static void configure_iface(const struct lease *L) {
     char ip[INET_ADDRSTRLEN], gw[INET_ADDRSTRLEN], mask[INET_ADDRSTRLEN];
     ipstr(L->ip, ip); ipstr(L->gw, gw); ipstr(L->mask, mask);
-    sh("/sbin/ifconfig %s inet %s %s netmask %s mtu %d up", utun_name, ip, gw, mask, MTU);
+    sh("/sbin/ifconfig %s inet %s %s netmask %s mtu %d up", utun_name, ip, gw, mask, iface_mtu);
     if (want_route) {
         sh("/sbin/route -q -n add -net 0.0.0.0/1 %s", gw);
         sh("/sbin/route -q -n add -net 128.0.0.0/1 %s", gw);
@@ -582,7 +602,7 @@ static int build_na(uint8_t *out, const uint8_t *f, int len) {
 }
 
 struct ra { int have_prefix; uint8_t prefix[16]; uint8_t plen; uint16_t router_lifetime; uint8_t router[16];
-            int gone; uint8_t gone_prefix[8]; };      /* gone : un /64 auto-configurable annoncé avec une durée de validité nulle */
+            int gone; uint8_t gone_prefix[8]; uint16_t mtu; };      /* gone : un /64 auto-configurable annoncé avec une durée de validité nulle */
 
 /* Analyse une annonce de routeur (RA). Tout vient du réseau : bornes vérifiées à chaque option.
  * Retourne 0 si c'est une RA valide (have_prefix indique si un préfixe /64 auto-configurable y figure). */
@@ -602,6 +622,10 @@ static int parse_ra(const uint8_t *f, int len, struct ra *r) {
     while (o + 2 <= end) {
         int l = o[1] * 8;
         if (l == 0 || o + l > end) break;
+        if (o[0] == 5 && l >= 8 && !r->mtu) {                        /* option MTU */
+            uint32_t m = be32(o + 4);
+            r->mtu = m > 0xffff ? 0xffff : (uint16_t)m;
+        }
         if (o[0] == 3 && l >= 32) {                                  /* Prefix Information */
             const uint8_t *p = o + 16;
             int onlink_auto = (o[3] & 0x40) != 0;                    /* drapeau A : SLAAC autorisé */
@@ -745,6 +769,8 @@ static void ra_apply(const struct ra *r, int64_t now) {
         v6_expire = now + r->router_lifetime;
         __atomic_store_n(&v6_withdraw, 0, __ATOMIC_RELAXED);
         memcpy(v6_router, r->router, 16);
+        v6_mtu = policy_mtu_from_peer(r->mtu, POLICY_MTU_MIN6);
+        if (v6_mtu >= MTU) v6_mtu = 0;                                   /* 1500 ou plus : rien à changer */
         memcpy(v6_addr, r->prefix, 8);
         do { arc4random_buf(v6_addr + 8, 8); v6_addr[8] &= ~0x02; }     /* identifiant aléatoire, non EUI-64 */
         while (!memcmp(v6_addr + 8, (uint8_t[8]){0}, 8));
@@ -853,7 +879,7 @@ static void *tx_thread(void *a) {
         if (n <= 4) continue;
         uint32_t af = be32(in);
         int len = n - 4;
-        if (len > MTU) continue;
+        if (len > __atomic_load_n(&cur_mtu, __ATOMIC_RELAXED)) continue;
         memcpy(frame, gw_mac, 6); memcpy(frame + 6, my_mac, 6);
         if (af == AF_INET) {
             putbe16(frame + 12, 0x0800);
@@ -1104,29 +1130,38 @@ static void handle_request(int sock, const struct ipc_msg *rq) {
     case IPC_REQ_CONFIG4: {
         uint32_t ip, gw, mask, dns;
         struct lease L;
-        if (utun_fd < 0 || cfg4_done || rq->len != 16) { rp.status = 200; break; }
+        if (utun_fd < 0 || cfg4_done || (rq->len != 16 && rq->len != 18)) { rp.status = 200; break; }
         memcpy(&ip, rq->data, 4); memcpy(&gw, rq->data + 4, 4);
         memcpy(&mask, rq->data + 8, 4); memcpy(&dns, rq->data + 12, 4);
         int e = policy_check_v4(ip, gw, mask, dns);
         if (e) { LOG("Configuration IPv4 refusée : %s", policy_strerror(e)); rp.status = (uint8_t)e; break; }
+        unsigned mtu4 = rq->len == 18 ? (unsigned)(rq->data[16] << 8 | rq->data[17]) : MTU;
+        if ((e = policy_check_mtu(mtu4, 0)) != POLICY_OK) { LOG("Configuration IPv4 refusée : %s", policy_strerror(e)); rp.status = (uint8_t)e; break; }
         if (!allow_overlap && (e = check_not_shadowing(ip, mask)) != POLICY_OK) { rp.status = (uint8_t)e; break; }
         memset(&L, 0, sizeof L);
         L.ip = ip; L.gw = gw; L.mask = mask; L.dns = dns;
         my_ip = ip; gw_ip = gw;
+        iface_mtu = (int)mtu4;
         configure_iface(&L);
         cfg4_done = 1;
         block_ipv6();                                                /* en attendant l'IPv6 du tethering, s'il en vient */
         break;
     }
     case IPC_REQ_CONFIG6: {
-        if (!ipv6_on || utun_fd < 0 || !cfg4_done || cfg6_done || rq->len != 32) { rp.status = 200; break; }
+        if (!ipv6_on || utun_fd < 0 || !cfg4_done || cfg6_done || (rq->len != 32 && rq->len != 34)) { rp.status = 200; break; }
         int e = policy_check_v6(rq->data, rq->data + 16);
         if (e) { LOG("Configuration IPv6 refusée : %s", policy_strerror(e)); rp.status = (uint8_t)e; break; }
+        unsigned mtu6 = rq->len == 34 ? (unsigned)(rq->data[32] << 8 | rq->data[33]) : 0;
+        if (mtu6 && (e = policy_check_mtu(mtu6, 1)) != POLICY_OK) { LOG("Configuration IPv6 refusée : %s", policy_strerror(e)); rp.status = (uint8_t)e; break; }
         memcpy(v6_addr, rq->data, 16);
         memcpy(v6_router, rq->data + 16, 16);
         unblock_ipv6();                                              /* les vraies routes remplacent les routes « reject » */
         configure_ipv6();
         cfg6_done = 1;
+        if (mtu6 && (int)mtu6 < iface_mtu) {                         /* un seul MTU pour l'interface : le plus petit des deux */
+            sh("/sbin/ifconfig %s mtu %u", utun_name, mtu6);
+            iface_mtu = (int)mtu6;
+        }
         break;
     }
     case IPC_REQ_DECONFIG6:
@@ -1340,7 +1375,7 @@ static int run_worker_once(unsigned vid, unsigned pid, uid_t uid, gid_t gid) {
         if (pthread_create(&pump.th, NULL, log_pump_thread, &pump) != 0) { pumping = 0; close(lp[0]); }
     }
     utun_fd = -1; cfg4_done = cfg6_done = 0; my_ip = gw_ip = 0;
-    v6_routes = v6_svc = v6_blocked = 0;
+    v6_routes = v6_svc = v6_blocked = 0; iface_mtu = MTU;
     struct rate_limit rl = {0, 0};
     int64_t last_seen = now_s();                                     /* dernier signe de vie du worker */
     int64_t prev_tick = last_seen;                                   /* fin du tour précédent (détection de la veille) */
@@ -1573,7 +1608,7 @@ static int session(void) {
     running = 1; utun_fd = -1; my_ip = gw_ip = srv_ip = 0;
     dhcp_active = 0; memset(&dhcp_c, 0, sizeof dhcp_c);
     v6_claimed = v6_pending = v6_routes = v6_svc = v6_withdraw = 0;
-    v6_expire = 0;
+    v6_expire = 0; v6_mtu = 0; cur_mtu = MTU;
     status_tick("connecting");
     if (libusb_claim_interface(h, ctrl_if) || libusb_claim_interface(h, data_if)) {
         LOG("Impossible de réserver les interfaces USB"); goto out;

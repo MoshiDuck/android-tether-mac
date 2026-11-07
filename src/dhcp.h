@@ -17,6 +17,7 @@ struct lease {
     uint32_t ip, mask, gw, dns, srv;
     uint32_t secs;          /* option 51 : durée du bail */
     uint32_t t1, t2;        /* options 58/59 : 0 si absentes */
+    uint16_t mtu;           /* option 26 : MTU de l'interface, 0 si absente */
     uint8_t type;           /* option 53 : type de message */
     uint8_t srvmac[6];      /* adresse Ethernet de l'émetteur de la réponse */
 };

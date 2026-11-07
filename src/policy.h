@@ -22,7 +22,8 @@ enum policy_err {
     POLICY_BAD_V6_ADDR,
     POLICY_BAD_V6_ROUTER,
     POLICY_BAD_STATUS,
-    POLICY_OVERLAP
+    POLICY_OVERLAP,
+    POLICY_BAD_MTU
 };
 
 #define POLICY_STATUS_MAX 90
@@ -40,6 +41,16 @@ int policy_subnets_overlap(uint32_t ip_a, uint32_t mask_a, uint32_t ip_b, uint32
  * sous-réseau qui recouvre un réseau déjà connecté au Mac. Ne considère que les réseaux « ordinaires »,
  * de préfixe /16 à /30 : une adresse hôte (/32, VPN) ou un très large réseau (/8, entreprise) ne bloquent pas. */
 int policy_check_overlap(uint32_t ip, uint32_t mask, uint32_t other_ip, uint32_t other_mask);
+
+/* MTU annoncé par le téléphone (DHCP option 26 ou RA IPv6) : de 576 (IPv4) ou 1280 (IPv6) à 1500. */
+#define POLICY_MTU_MAX 1500
+#define POLICY_MTU_MIN4 576
+#define POLICY_MTU_MIN6 1280
+int policy_check_mtu(unsigned mtu, int ipv6);
+
+/* Valeur reçue du téléphone -> MTU à utiliser : 0 si absente ou inférieure à `min` (on garde alors la valeur par
+ * défaut), plafonnée à POLICY_MTU_MAX (les tampons du driver ne portent pas plus). */
+unsigned policy_mtu_from_peer(unsigned raw, unsigned min);
 
 /* Texte d'état affiché par l'icône : "waiting", "connecting" ou "connected <ipv4> utun<N>". */
 int policy_check_status(const char *text, size_t len);
