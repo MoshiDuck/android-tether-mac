@@ -52,6 +52,10 @@ when no RNDIS device is found. USB debugging must be enabled and authorised.
 .B \-4
 IPv4 only: do not relay IPv6.
 .TP
+.B \-O
+Accept a phone subnet that overlaps a network already connected to the Mac.
+By default such a subnet is refused, so that a malicious phone cannot shadow a local network.
+.TP
 .BI \-U " user"
 User that runs
 .BR adb .

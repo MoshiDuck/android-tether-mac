@@ -906,23 +906,28 @@ struct connected_net { uint32_t ip, mask; };
 int test_list_connected(struct connected_net *out, int max);   /* fourni par les tests */
 #endif
 
-static int list_connected(struct connected_net *out, int max) {
-#ifdef RNDIS_TESTING
-    return test_list_connected(out, max);
-#else
+/* Interroge le système : réseaux IPv4 des interfaces actives, hors boucle locale et hors `skip_name`. */
+static int list_connected_system(struct connected_net *out, int max, const char *skip_name) {
     struct ifaddrs *all, *p;
     int n = 0;
     if (getifaddrs(&all) < 0) return 0;
     for (p = all; p && n < max; p = p->ifa_next) {
         if (!p->ifa_addr || !p->ifa_netmask || p->ifa_addr->sa_family != AF_INET) continue;
         if (!(p->ifa_flags & IFF_UP) || (p->ifa_flags & IFF_LOOPBACK)) continue;
-        if (!strcmp(p->ifa_name, utun_name)) continue;
+        if (skip_name && skip_name[0] && !strcmp(p->ifa_name, skip_name)) continue;
         out[n].ip = ((struct sockaddr_in *)(void *)p->ifa_addr)->sin_addr.s_addr;
         out[n].mask = ((struct sockaddr_in *)(void *)p->ifa_netmask)->sin_addr.s_addr;
         n++;
     }
     freeifaddrs(all);
     return n;
+}
+
+static int list_connected(struct connected_net *out, int max) {
+#ifdef RNDIS_TESTING
+    return test_list_connected(out, max);                  /* les tests simulent la liste ; list_connected_system est testée à part */
+#else
+    return list_connected_system(out, max, utun_name);
 #endif
 }
 

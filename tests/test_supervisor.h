@@ -344,7 +344,39 @@ static void test_drop_privileges(void) {
     CHECK(drop_privileges(65534, 65534) == -1);                      /* sans root, l'abandon échoue (et on le détecte) */
 }
 
+/* La vraie interrogation du système (getifaddrs) renvoie des réseaux cohérents : jamais d'adresse nulle, de boucle locale ou de masque invalide. */
+static void test_list_connected_system(void) {
+    struct connected_net nets[64];
+    int n = list_connected_system(nets, 64, NULL);
+    CHECK(n >= 0 && n <= 64);
+    for (int k = 0; k < n; k++) {
+        uint32_t ip = ntohl(nets[k].ip), m = ntohl(nets[k].mask);
+        CHECK(ip != 0 && (ip >> 24) != 127);
+        CHECK(m != 0 && (~m & (~m + 1)) == 0);                       /* masque contigu */
+    }
+    if (n > 0) {                                                      /* le filtrage par nom retire bien l'interface demandée */
+        struct ifaddrs *all, *p;
+        char name[IFNAMSIZ] = "";
+        if (getifaddrs(&all) == 0) {
+            for (p = all; p && !name[0]; p = p->ifa_next) {
+                if (p->ifa_addr && p->ifa_netmask && p->ifa_addr->sa_family == AF_INET && (p->ifa_flags & IFF_UP) &&
+                    !(p->ifa_flags & IFF_LOOPBACK))
+                    snprintf(name, sizeof name, "%s", p->ifa_name);
+            }
+            int cnt_name = 0;
+            for (p = all; p; p = p->ifa_next)
+                if (p->ifa_addr && p->ifa_netmask && p->ifa_addr->sa_family == AF_INET && (p->ifa_flags & IFF_UP) &&
+                    !(p->ifa_flags & IFF_LOOPBACK) && !strcmp(p->ifa_name, name))
+                    cnt_name++;
+            freeifaddrs(all);
+            CHECK(list_connected_system(nets, 64, name) == n - cnt_name);
+        }
+    }
+    CHECK(list_connected_system(nets, 0, NULL) == 0);                 /* tampon de taille nulle : rien n'est écrit */
+}
+
 static void run_supervisor_tests(void) {
+    test_list_connected_system();
     test_sup_config4();
     test_sup_overlap();
     test_sup_config6();

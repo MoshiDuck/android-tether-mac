@@ -5,6 +5,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Security
+- **Subnet-overlap guard.** The supervisor refuses a phone subnet that overlaps an ordinary network (/16 to /30) already connected to the Mac, so a malicious phone cannot shadow a local network. Host addresses (a VPN /32) and very wide networks (a corporate /8) do not block tethering. `-O` accepts an overlap knowingly.
+- **Request rate limit.** A worker sending more than 30 requests in 10 seconds is killed and replaced.
+
+### Added
+- `rndis-tether --version` / `-V`, a man page (`man rndis-tether`), and a `VERSION` file that the release script and workflow check against the tag.
+- The DHCP lease is returned to the server (`DHCPRELEASE`, RFC 2131 §3.1.7) when a session ends normally.
+
 ## [0.2.0] - 2026-11-06
 
 **Security-model release**: the root service is split so that code reading data from the phone or the network no longer runs as root. Upgrade with `brew upgrade android-tether-mac && tethermac-install`.

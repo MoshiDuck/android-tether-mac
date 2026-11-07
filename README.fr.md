@@ -43,6 +43,8 @@ sudo ./rndis-tether -v -r -w -a
 - `-a` active le Modem USB du téléphone via `adb` (débogage USB requis)
 - `-4` IPv4 uniquement (désactive le relais IPv6)
 - `-W user` utilisateur sans privilèges du processus worker (défaut `nobody`)
+- `-O` accepte un sous-réseau du téléphone qui recouvre un réseau déjà utilisé (refusé par défaut)
+- `-V`, `--version` affiche la version
 - `-U user` utilisateur pour `adb` (défaut `$SUDO_USER`)
 - `-d vid:pid` cible un appareil précis ; `-v` logs détaillés
 
