@@ -33,6 +33,13 @@ static int cmd_has(const char *needle) {
     return 0;
 }
 
+/* sortie simulée de `adb devices` (le superviseur la lit via sh_capture) */
+static const char *adb_canned = "List of devices attached\nR5CX1234ABC\tdevice\n";
+const char *test_capture_text(const char *cmd) {
+    (void)cmd;
+    return adb_canned;
+}
+
 /* réseaux « connectés au Mac » simulés pour la garde contre le masquage de sous-réseau */
 static struct connected_net test_nets[8];
 static int test_nnets;
@@ -61,6 +68,8 @@ static void sup_reset(void) {
     v6_routes = v6_svc = dns_applied = 0;
     v6_blocked = allow_v6_leak = 0;
     iface_mtu = MTU; cur_mtu = MTU; v6_mtu = 0;
+    adb_serial = NULL; adb_last_status = -1;
+    adb_canned = "List of devices attached\nR5CX1234ABC\tdevice\n";
     want_route = 1; ipv6_on = 1; auto_adb = 0; last_adb_run = 0; adb_user = NULL;
     worker_mode = 0; quit = 0; running = 1;
     snprintf(status_text, sizeof status_text, "starting");
@@ -781,6 +790,27 @@ static void test_sup_status(void) {
     CHECK(sup_call(msg(IPC_REQ_STATUS, ok, (uint16_t)strlen(ok)), &rp, &fd) == 1 && rp.status != 0);
 }
 
+static int adb_enabled(void) { return cmd_has("svc usb setFunctions rndis"); }
+
+static char *stderr_of_two_adb_calls(void) {
+    char path[] = "/tmp/rndis-test-adb-XXXXXX";
+    int fd = mkstemp(path);
+    CHECK(fd >= 0);
+    int saved = dup(STDERR_FILENO);
+    dup2(fd, STDERR_FILENO);
+    close(fd);
+    struct ipc_msg rp;
+    int f = -1;
+    sup_call(msg(IPC_REQ_ADB, NULL, 0), &rp, &f);
+    last_adb_run = 0;                                                /* le délai de 10 s ne bloque pas le second appel */
+    sup_call(msg(IPC_REQ_ADB, NULL, 0), &rp, &f);
+    dup2(saved, STDERR_FILENO);
+    close(saved);
+    char *t = slurp(path);
+    unlink(path);
+    return t ? t : calloc(1, 1);
+}
+
 static void test_sup_adb(void) {
     sup_reset();
     struct ipc_msg rp;
@@ -789,7 +819,8 @@ static void test_sup_adb(void) {
     auto_adb = 1;
     adb_user = "gabriel";
     CHECK(sup_call(msg(IPC_REQ_ADB, NULL, 0), &rp, &fd) == 1 && rp.status == 0);
-    CHECK(cmd_has("/usr/bin/sudo -u gabriel /bin/zsh -lc 'adb shell svc usb setFunctions rndis'"));
+    CHECK(cmd_has("adb devices"));                                   /* on regarde d'abord ce qu'adb voit */
+    CHECK(cmd_has("/usr/bin/sudo -u gabriel /bin/zsh -lc 'adb -s R5CX1234ABC shell svc usb setFunctions rndis'"));
     int before = ncmds;
     CHECK(sup_call(msg(IPC_REQ_ADB, NULL, 0), &rp, &fd) == 1 && rp.status == 200);                 /* limité en fréquence */
     CHECK(ncmds == before);
@@ -801,7 +832,64 @@ static void test_sup_adb(void) {
     last_adb_run = 0;
     adb_user = "$(id)";
     sup_call(msg(IPC_REQ_ADB, NULL, 0), &rp, &fd);
+    last_adb_run = 0;
+    adb_user = "";
+    sup_call(msg(IPC_REQ_ADB, NULL, 0), &rp, &fd);
+    last_adb_run = 0;
+    char longu[100];
+    memset(longu, 'u', sizeof longu - 1); longu[sizeof longu - 1] = '\0';                       /* nom trop long : refusé */
+    adb_user = longu;
+    sup_call(msg(IPC_REQ_ADB, NULL, 0), &rp, &fd);
     CHECK(ncmds == 0);
+    adb_user = "gabriel";
+
+    struct { const char *out; int enables; const char *msg; } cases[] = {
+        {"ADB_MISSING\n", 0, "adb est introuvable"},
+        {"List of devices attached\n\n", 0, "ne voit aucun téléphone"},
+        {"List of devices attached\nR5\tunauthorized\n", 0, "n'a pas autorisé ce Mac"},
+        {"List of devices attached\nR5\toffline\n", 0, "hors ligne"},
+        {"List of devices attached\nR5\trecovery\n", 0, "état inattendu"},
+        {"List of devices attached\nAAA\tdevice\nBBB\tdevice\n", 0, "plusieurs appareils adb"},
+        {"List of devices attached\nAAA\tdevice\nBBB\tunauthorized\n", 1, NULL},
+    };
+    for (size_t k = 0; k < sizeof cases / sizeof cases[0]; k++) {
+        sup_reset();
+        auto_adb = 1; adb_user = "gabriel";
+        adb_canned = cases[k].out;
+        char *t = stderr_of_two_adb_calls();
+        CHECK(adb_enabled() == cases[k].enables);
+        if (cases[k].msg) {
+            CHECK(strstr(t, cases[k].msg) != NULL);
+            CHECK(count_lines_with(t, "adb : ") == 1);                                         /* dit une fois, pas toutes les 10 s */
+        } else {
+            CHECK(strstr(t, "adb : ") == NULL);
+        }
+        CHECK(cmd_count("svc usb setFunctions rndis") == cases[k].enables * 2);                /* ... mais agit chaque fois */
+        free(t);
+    }
+
+    sup_reset();                                                     /* -S désigne le téléphone parmi plusieurs */
+    auto_adb = 1; adb_user = "gabriel"; adb_serial = "BBB";
+    adb_canned = "List of devices attached\nAAA\tdevice\nBBB\tdevice\n";
+    CHECK(sup_call(msg(IPC_REQ_ADB, NULL, 0), &rp, &fd) == 1 && rp.status == 0);
+    CHECK(cmd_has("adb -s BBB shell svc usb setFunctions rndis") && !cmd_has("-s AAA"));
+
+    sup_reset();                                                     /* -S absent de la liste : rien n'est basculé */
+    auto_adb = 1; adb_user = "gabriel"; adb_serial = "CCC";
+    adb_canned = "List of devices attached\nAAA\tdevice\n";
+    CHECK(sup_call(msg(IPC_REQ_ADB, NULL, 0), &rp, &fd) == 1 && rp.status == 0);
+    CHECK(!adb_enabled());
+
+    sup_reset();                                                     /* le problème est résolu : le message peut revenir plus tard */
+    auto_adb = 1; adb_user = "gabriel";
+    adb_canned = "List of devices attached\nR5\tunauthorized\n";
+    sup_call(msg(IPC_REQ_ADB, NULL, 0), &rp, &fd);
+    CHECK(adb_last_status == ADB_UNAUTHORIZED);
+    last_adb_run = 0;
+    adb_canned = "List of devices attached\nR5\tdevice\n";
+    sup_call(msg(IPC_REQ_ADB, NULL, 0), &rp, &fd);
+    CHECK(adb_last_status == ADB_OK && adb_enabled());
+    sup_reset();
 }
 
 static void test_sup_unknown(void) {

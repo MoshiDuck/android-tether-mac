@@ -44,6 +44,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "adb.h"
 #include "bytes.h"
 #include "dhcp.h"
 #include "diagnose.h"
@@ -232,6 +233,7 @@ static void request_adb(void) { ipc_call(IPC_REQ_ADB, NULL, 0, NULL, NULL, 90000
 #define FLAG_DISABLED "/Users/Shared/rndis-tether.disabled"
 #define STATUS_FILE   "/Users/Shared/rndis-tether.status"
 static const char *adb_user;
+static const char *adb_serial;       /* -S : numéro de série du téléphone à basculer (plusieurs appareils adb) */
 static char status_text[160] = "starting";
 
 #ifdef RNDIS_TESTING
@@ -1030,16 +1032,66 @@ static int release_lease(void) {
 
 /* Bascule le téléphone en RNDIS via adb, exécuté en tant qu'utilisateur appelant sudo
  * (ses clés ADB et son PATH, pas ceux de root). */
+#define ADB_USER_MAX 64
+static int adb_user_valid(const char *u) {
+    size_t n = u ? strlen(u) : 0;
+    if (n == 0 || n > ADB_USER_MAX) return 0;
+    for (const char *c = u; *c; c++)
+        if (!isalnum((unsigned char)*c) && *c != '_' && *c != '-' && *c != '.') return 0;
+    return 1;
+}
+
+/* Lit la sortie d'une commande fixe. Dans les tests, la sortie est celle que le test a préparée. */
+#ifdef RNDIS_TESTING
+const char *test_capture_text(const char *cmd);
+#endif
+static void sh_capture(char *out, size_t cap, const char *fmt, ...) PRINTF_LIKE(3, 4);
+static void sh_capture(char *out, size_t cap, const char *fmt, ...) {
+    char cmd[320];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(cmd, sizeof cmd, fmt, ap);
+    va_end(ap);
+    out[0] = '\0';
+#ifdef RNDIS_TESTING
+    test_record_command(cmd);
+    snprintf(out, cap, "%s", test_capture_text(cmd));
+    return;
+#endif
+    VLOG("$ %s", cmd);
+    FILE *p = popen(cmd, "r");
+    if (!p) return;
+    size_t n = fread(out, 1, cap - 1, p);
+    out[n] = '\0';
+    pclose(p);
+}
+
+static int adb_last_status = -1;                 /* pour ne pas répéter le même message toutes les 10 s */
+
+/* Bascule le téléphone en Modem USB. Avant, on regarde ce qu'adb voit : un échec silencieux ne dit pas quoi faire
+ * (adb absent, débogage USB coupé, téléphone non autorisé, plusieurs téléphones). Chaque problème est écrit une
+ * fois dans le journal, avec la marche à suivre. */
 static void adb_enable(void) {
     const char *u = adb_user ? adb_user : getenv("SUDO_USER");
-    if (!u || !*u) return;
-    for (const char *c = u; *c; c++)
-        if (!isalnum((unsigned char)*c) && *c != '_' && *c != '-' && *c != '.') return;
-    sh("/usr/bin/sudo -u %s /bin/zsh -lc 'adb shell svc usb setFunctions rndis' >/dev/null 2>&1 || true", u); /* adb échoue souvent car l'USB se ré-énumère */
+    if (!adb_user_valid(u)) return;
+    char out[2048];
+    sh_capture(out, sizeof out, "/usr/bin/sudo -u %s /bin/zsh -lc 'command -v adb >/dev/null 2>&1 || echo ADB_MISSING; adb devices 2>&1'", u);
+    struct adb_devices d;
+    const char *serial;
+    adb_parse_devices(out, &d);
+    enum adb_status st = adb_choose(&d, adb_serial, &serial);
+    if (st != ADB_OK) {
+        if ((int)st != adb_last_status) LOG("adb : %s", adb_status_message(st));
+        adb_last_status = (int)st;
+        return;
+    }
+    adb_last_status = (int)st;
+    if (*serial) sh("/usr/bin/sudo -u %s /bin/zsh -lc 'adb -s %s shell svc usb setFunctions rndis' >/dev/null 2>&1 || true", u, serial);
+    else sh("/usr/bin/sudo -u %s /bin/zsh -lc 'adb shell svc usb setFunctions rndis' >/dev/null 2>&1 || true", u);   /* adb échoue souvent car l'USB se ré-énumère */
 }
 
 static void usage(const char *p) {
-    fprintf(stderr, "Usage: sudo %s [-r] [-w] [-a] [-4] [-U user] [-W user] [-v] [-d vid:pid]\n"
+    fprintf(stderr, "Usage: sudo %s [-r] [-w] [-a] [-4] [-U user] [-S serial] [-W user] [-v] [-d vid:pid]\n"
                     "       %s --version\n"
                     "       %s --diagnose   rapport à coller dans un ticket (sans sudo)\n"
                     "  -r  route tout le trafic via le téléphone (routes 0/1 et 128/1, retirées à la sortie)\n"
@@ -1047,6 +1099,7 @@ static void usage(const char *p) {
                     "  -w  attendre le téléphone et se reconnecter après un débranchement\n"
                     "  -a  activer le Modem USB du téléphone via adb (débogage USB requis)\n"
                     "  -U  utilisateur pour adb (défaut: SUDO_USER ; requis en LaunchDaemon)\n"
+                    "  -S  numéro de série du téléphone pour adb quand plusieurs appareils sont branchés\n"
                     "  -W  utilisateur sans privilèges du worker (défaut: nobody)\n"
                     "  -4  IPv4 uniquement (désactive le relais IPv6)\n"
                     "  -O  accepter un sous-réseau du téléphone qui recouvre un réseau déjà utilisé\n"
@@ -1582,13 +1635,14 @@ int main(int argc, char **argv) {
     int opt;
     if (argc > 1 && !strcmp(argv[1], "--version")) { printf("rndis-tether %s\n", RNDIS_VERSION); return 0; }
     if (argc > 1 && !strcmp(argv[1], "--diagnose")) return diagnose_main();
-    while ((opt = getopt(argc, argv, "rwavd:U:W:4OLVh")) != -1) {
+    while ((opt = getopt(argc, argv, "rwavd:U:W:S:4OLVh")) != -1) {
         switch (opt) {
         case 'L': allow_v6_leak = 1; break;
         case 'O': allow_overlap = 1; break;
         case 'V': printf("rndis-tether %s\n", RNDIS_VERSION); return 0;
         case '4': ipv6_on = 0; break;
         case 'U': adb_user = optarg; break;
+        case 'S': if (!adb_serial_valid(optarg)) { fprintf(stderr, "-S : numéro de série invalide\n"); return 2; } adb_serial = optarg; break;
         case 'W': worker_user = optarg; break;
         case 'a': auto_adb = 1; break;
         case 'r': want_route = 1; break;
