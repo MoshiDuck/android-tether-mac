@@ -16,6 +16,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - A router advertisement with a router lifetime of 0 (not a default router) is no longer used to configure IPv6.
 
 ### Added
+- **Sleep/wake handling.** The supervisor notices a wake of the Mac (a gap of 15 s or more between two of its one-second turns), logs it, ends the session cleanly and starts a new one that finds the phone again and runs DHCP, instead of waiting for USB and lease timeouts one by one. Tested with a simulated clock jump; not yet checked on a real sleep.
 - **Log rotation.** `install.sh` installs `/etc/newsyslog.d/rndis-tether.conf` (above 1 MB, five compressed archives) and the supervisor reopens the log file when it is renamed or removed; `uninstall.sh` removes both. Not yet checked with the real `newsyslog` on a Mac.
 - **`rndis-tether --diagnose`**: a report for bug reports, with no `sudo` and no changes to the system. It shows the service (supervisor and worker), the USB devices with a network, ADB or MTP interface, the ADB state, the IPv4 and IPv6 routes of the tether, the DNS resolvers, the end of the log and a plain-language diagnosis (cable, tethering not enabled, service stopped, disabled from the menu, IPv6 blocked by the leak guard…). MAC addresses are cut after the vendor part, public IPv4 and global IPv6 addresses are masked and ADB serial numbers are not shown. The bug report form now asks for it.
 

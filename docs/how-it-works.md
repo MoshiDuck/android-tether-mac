@@ -113,6 +113,8 @@ Once an IPv6 address exists, a third entry, `.../IPv6` (address, prefix length, 
   - `-a`: if no RNDIS device is found, switch the phone to tethering by running `adb shell svc usb setFunctions rndis` **as your user** (so it uses your ADB keys and PATH, not root's). `adb` usually reports an error because the USB bus re-enumerates during the switch; that is ignored.
 - **LaunchAgent** (your session): the menu bar app.
 
+**Sleep and wake.** The supervisor loop turns every second; a gap of 15 s or more between two turns means the Mac was asleep. It then ends the session cleanly and starts a new one, which finds the phone and runs DHCP again, instead of waiting for USB and lease timeouts one by one. The lease clock counts sleep time too (`CLOCK_MONOTONIC` keeps running on macOS).
+
 **Dead sessions.** If the phone vanishes or re-enumerates, USB calls return an I/O or "no device" error — or just time out. The driver treats a device error, or five consecutive send timeouts, as a dead session: it removes routes and DNS, releases the interface, and goes back to waiting.
 
 **Menu bar ↔ service.** The app is not root, so it does not talk to the service directly. They share two files in `/Users/Shared`:

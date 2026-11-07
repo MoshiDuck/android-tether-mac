@@ -135,10 +135,17 @@ PRINTF_LIKE(1, 2) static void logf_(const char *fmt, ...) {
 static void on_signal(int s) { (void)s; running = 0; quit = 1; }
 
 /* Horloge monotone en secondes : continue d'avancer pendant la veille du Mac (comme le bail DHCP). */
+#ifdef RNDIS_TESTING
+static volatile int64_t test_clock_offset;      /* les tests simulent une veille en avançant l'horloge */
+#endif
 static int64_t now_s(void) {
     struct timespec t;
     clock_gettime(CLOCK_MONOTONIC, &t);
+#ifdef RNDIS_TESTING
+    return t.tv_sec + test_clock_offset;
+#else
     return t.tv_sec;
+#endif
 }
 
 /* ---------- Worker : demandes au superviseur ----------
@@ -249,6 +256,16 @@ static void thread_beat(unsigned bit) { __atomic_or_fetch(&thread_alive, bit, __
 static int worker_threads_alive(void) {
     if (!__atomic_load_n(&threads_running, __ATOMIC_ACQUIRE)) return 1;
     return (__atomic_exchange_n(&thread_alive, 0, __ATOMIC_RELAXED) & WORKER_THREADS) == WORKER_THREADS;
+}
+
+/* Veille du Mac : la boucle du superviseur tourne toutes les secondes ; un écart bien plus grand entre deux tours
+ * signifie que le Mac dormait. Le lien USB, le bail DHCP et l'IPv6 sont alors à refaire : plutôt que d'attendre
+ * des délais d'expiration un par un, on termine la session proprement (bail rendu si possible, routes retirées)
+ * et le superviseur en relance une neuve, qui retrouve le téléphone et refait DHCP. */
+#define WAKE_GAP_S 15
+static int wake_gap_s = WAKE_GAP_S;
+static int wake_detected(int64_t now, int64_t prev_tick, int gap_s) {
+    return gap_s > 0 && now - prev_tick >= gap_s;
 }
 
 /* Vrai si le worker est silencieux depuis trop longtemps. */
@@ -1326,11 +1343,19 @@ static int run_worker_once(unsigned vid, unsigned pid, uid_t uid, gid_t gid) {
     v6_routes = v6_svc = v6_blocked = 0;
     struct rate_limit rl = {0, 0};
     int64_t last_seen = now_s();                                     /* dernier signe de vie du worker */
+    int64_t prev_tick = last_seen;                                   /* fin du tour précédent (détection de la veille) */
 
     for (;;) {
         struct ipc_msg m;
         int fd = -1;
         int r = ipc_recv(sv[0], &m, &fd, 1000);
+        int64_t now = now_s();
+        if (wake_detected(now, prev_tick, wake_gap_s)) {
+            LOG("Réveil du Mac détecté (environ %d s de veille) : la session est relancée", (int)(now - prev_tick));
+            if (fd >= 0) close(fd);
+            kill(child, SIGTERM);
+            break;
+        }
         if (r == 1) {
             if (fd >= 0) close(fd);                                  /* un worker n'a aucune raison de nous passer un descripteur */
             if (!rate_allow(&rl, now_s(), IPC_RATE_MAX, IPC_RATE_WINDOW)) {
@@ -1348,6 +1373,7 @@ static int run_worker_once(unsigned vid, unsigned pid, uid_t uid, gid_t gid) {
             kill(child, SIGKILL);
             break;
         }
+        prev_tick = now_s();
         status_tick(NULL);                                           /* rafraîchit le fichier d'état */
         log_reopen_if_rotated(LOG_FILE);
         if (quit || is_disabled()) { kill(child, SIGTERM); break; }

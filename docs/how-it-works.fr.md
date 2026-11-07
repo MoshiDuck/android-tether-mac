@@ -113,6 +113,8 @@ Dès qu'une adresse IPv6 existe, une troisième entrée, `.../IPv6` (adresse, lo
   - `-a` : si aucun appareil RNDIS n'est trouvé, basculer le téléphone en partage de connexion avec `adb shell svc usb setFunctions rndis`, exécuté **en tant que ton utilisateur** (donc avec tes clés ADB et ton PATH, pas ceux de root). `adb` signale souvent une erreur parce que le bus USB se ré-énumère pendant la bascule ; c'est ignoré.
 - **LaunchAgent** (ta session) : l'app de barre de menus.
 
+**Veille et réveil.** La boucle du superviseur tourne toutes les secondes ; un écart de 15 s ou plus entre deux tours signifie que le Mac dormait. Il termine alors la session proprement et en lance une neuve, qui retrouve le téléphone et refait DHCP, au lieu d'attendre un à un les délais d'expiration USB et du bail. L'horloge du bail compte aussi la veille (`CLOCK_MONOTONIC` continue sous macOS).
+
 **Sessions mortes.** Si le téléphone disparaît ou se ré-énumère, les appels USB renvoient une erreur d'E/S ou « pas d'appareil », ou simplement un timeout. Le driver considère une erreur d'appareil, ou cinq timeouts d'envoi de suite, comme une session morte : il retire routes et DNS, libère l'interface et retourne en attente.
 
 **Barre de menus ↔ service.** L'app n'est pas root, elle ne parle donc pas directement au service. Ils partagent deux fichiers dans `/Users/Shared` :
