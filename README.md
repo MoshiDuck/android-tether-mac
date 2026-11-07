@@ -104,7 +104,7 @@ This has only been tested on a **Samsung Galaxy S24 Ultra**. Other phones should
 ## Limitations
 
 - IPv6 needs the phone to advertise a `/64` prefix (it did on the tested phone); otherwise the tether stays IPv4-only. IPv6-only DNS servers announced by the router are not used. Use `-4` to turn IPv6 off. IPv6 is not faster than IPv4 here — the mobile network dominates
-- DHCP renewal was observed on the tested phone with the earlier broadcast form; the RFC 2131 forms (unicast at T1, broadcast at T2, expiry) are covered by tests with a simulated clock and still need a live check on a real lease
+- DHCP: the unicast renewal at T1 has been observed on the tested phone (RFC 2131 form, accepted by its server); the rebind at T2 and the expiry path are covered by simulated-clock tests but not yet seen on a real lease
 - If the supervisor is killed with `kill -9`, the routes `0.0.0.0/1` and `128.0.0.0/1` may remain: `sudo route -n delete -net 0.0.0.0/1` and `128.0.0.0/1`
 
 ## Development

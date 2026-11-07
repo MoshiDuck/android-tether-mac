@@ -13,7 +13,7 @@ Legend: ✅ done · 🔶 done in the code, waiting for validation on real hardwa
 | Core | ✅ userspace RNDIS (libusb + `utun`), DHCP, ARP, IPv4 and IPv6, DNS, routes, reconnection |
 | Service | ✅ LaunchDaemon + menu bar app, `adb` activation, Homebrew tap, `--HEAD` channel |
 | Quality | ✅ strict warnings, static analysis, ASan/UBSan tests (1.3 M checks), coverage thresholds, CI on 2 macOS versions |
-| Security | ✅ 3 memory-safety bugs found by fuzzing and fixed; 🔶 privilege separation; 🔶 RFC 2131 DHCP |
+| Security | ✅ 3 memory-safety bugs found by fuzzing and fixed; ✅ privilege separation (validated live); ✅ RFC 2131 DHCP (validated live) |
 | Phones | one: Samsung Galaxy S24 Ultra (SM-S928B, Android 16) |
 
 ---
@@ -22,8 +22,8 @@ Legend: ✅ done · 🔶 done in the code, waiting for validation on real hardwa
 
 Goal: a bug in the code that reads data from the phone or the network can no longer give root.
 
-- 🔶 **Privilege separation** — a tiny root supervisor and an unprivileged worker (`nobody`); fixed-size IPC; every request validated by `policy.c`; one fresh worker per session. *To validate live:* that macOS lets `nobody` open the USB device (if not, fall back to a dedicated user or the console user via `-W`).
-- 🔶 **DHCP per RFC 2131** — unicast renewal at T1, broadcast rebind at T2, retransmission back-off, expiry and NAK handling. *To validate live:* a unicast renewal against the phone's DHCP server.
+- ✅ **Privilege separation** — a tiny root supervisor and an unprivileged worker (`nobody`); fixed-size IPC; every request validated by `policy.c`; one fresh worker per session. *Validated live on the S24 Ultra (2026-11-06):* `nobody` can open the USB device; the two-process service carried IPv4 and IPv6 traffic, survived the menu bar toggle and a real USB drop, and cleaned up routes and DNS each time. The `-W` option remains for systems where that is not the case.
+- ✅ **DHCP per RFC 2131** — unicast renewal at T1, broadcast rebind at T2, retransmission back-off, expiry and NAK handling. *Validated live on the S24 Ultra (2026-11-06):* the unicast renewal at T1 was accepted (`bail renouvelé`). The rebind at T2 and expiry paths are covered by simulated-clock tests only.
 - ⬜ **`DHCPRELEASE` on shutdown** so the phone's address pool is not left with stale leases.
 - ⬜ **Subnet-overlap guard** — refuse a phone subnet that overlaps a network the Mac already uses (a malicious phone could otherwise shadow a LAN). Needs a clear error message, since a legitimate clash would block tethering.
 - ⬜ **Privilege-drop hardening** — also set resource limits (`RLIMIT_NPROC`, `RLIMIT_FSIZE`) and verify, at startup, that the worker really lost root in a self-test.
@@ -115,7 +115,7 @@ Criteria, all required:
 
 | Risk | What we do |
 |------|-----------|
-| `nobody` cannot open USB devices on current macOS | Validate first (probe command in the release notes of 0.2.0); fall back to a dedicated service user created by `install.sh`, or the console user. |
+| `nobody` cannot open USB devices on some macOS versions | Works on the tested macOS 26.5 (probe: open succeeded as `nobody`). Keep `-W` for other cases; consider a dedicated service user created by `install.sh`. |
 | macOS tightens `utun`, IOKit or launchd rules | Keep the privileged part tiny; test each new macOS beta; the CI runs on two versions. |
 | Android drops RNDIS for NCM | The project becomes unnecessary for those phones, which is fine; track device support and say so in the README. |
 | A malicious phone | It can already offer any DHCP configuration. The supervisor validates what it applies, and the subnet-overlap guard closes the LAN-shadowing case. |

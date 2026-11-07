@@ -13,7 +13,7 @@ Légende : ✅ fait · 🔶 fait dans le code, en attente de validation sur mat�
 | Cœur | ✅ RNDIS en espace utilisateur (libusb + `utun`), DHCP, ARP, IPv4 et IPv6, DNS, routes, reconnexion |
 | Service | ✅ LaunchDaemon + icône de menu, activation par `adb`, tap Homebrew, canal `--HEAD` |
 | Qualité | ✅ avertissements stricts, analyse statique, tests ASan/UBSan (1,3 M de vérifications), seuils de couverture, CI sur 2 versions de macOS |
-| Sécurité | ✅ 3 bogues mémoire trouvés par fuzzing et corrigés ; 🔶 séparation des privilèges ; 🔶 DHCP conforme RFC 2131 |
+| Sécurité | ✅ 3 bogues mémoire trouvés par fuzzing et corrigés ; ✅ séparation des privilèges (validée en réel) ; ✅ DHCP conforme RFC 2131 (validé en réel) |
 | Téléphones | un seul : Samsung Galaxy S24 Ultra (SM-S928B, Android 16) |
 
 ---
@@ -22,8 +22,8 @@ Légende : ✅ fait · 🔶 fait dans le code, en attente de validation sur mat�
 
 Objectif : un bogue dans le code qui lit des données du téléphone ou du réseau ne peut plus donner root.
 
-- 🔶 **Séparation des privilèges** — un petit superviseur root et un worker sans privilèges (`nobody`) ; IPC à messages de taille fixe ; chaque demande validée par `policy.c` ; un worker neuf par session. *À valider en réel :* que macOS laisse `nobody` ouvrir l'appareil USB (sinon, repli sur un utilisateur dédié ou l'utilisateur de la session via `-W`).
-- 🔶 **DHCP selon la RFC 2131** — renouvellement en unicast à T1, rebind en broadcast à T2, retransmissions, gestion de l'expiration et du NAK. *À valider en réel :* un renouvellement unicast auprès du serveur DHCP du téléphone.
+- ✅ **Séparation des privilèges** — un petit superviseur root et un worker sans privilèges (`nobody`) ; IPC à messages de taille fixe ; chaque demande validée par `policy.c` ; un worker neuf par session. *Validée en réel sur le S24 Ultra (2026-11-06) :* `nobody` peut ouvrir l'appareil USB ; le service à deux processus a fait passer IPv4 et IPv6, résisté à l'interrupteur de l'icône et à une vraie coupure USB, et nettoyé routes et DNS à chaque fois. L'option `-W` reste disponible pour les systèmes où ce ne serait pas le cas.
+- ✅ **DHCP selon la RFC 2131** — renouvellement en unicast à T1, rebind en broadcast à T2, retransmissions, gestion de l'expiration et du NAK. *Validé en réel sur le S24 Ultra (2026-11-06) :* le renouvellement unicast à T1 a été accepté (`bail renouvelé`). Le rebind à T2 et l'expiration ne sont couverts que par des tests à horloge simulée.
 - ⬜ **`DHCPRELEASE` à l'arrêt**, pour ne pas laisser de baux orphelins dans le pool d'adresses du téléphone.
 - ⬜ **Garde contre le chevauchement de sous-réseau** — refuser un sous-réseau du téléphone qui recouvre un réseau déjà utilisé par le Mac (un téléphone malveillant pourrait sinon masquer un réseau local). Message d'erreur clair, car un conflit légitime bloquerait le tethering.
 - ⬜ **Durcissement de l'abandon de privilèges** — limites de ressources (`RLIMIT_NPROC`, `RLIMIT_FSIZE`) et auto-test au démarrage prouvant que le worker a bien perdu root.
@@ -115,7 +115,7 @@ Critères, tous obligatoires :
 
 | Risque | Ce que nous faisons |
 |--------|---------------------|
-| `nobody` ne peut pas ouvrir d'appareil USB sur le macOS actuel | Valider d'abord (commande de test dans les notes de la 0.2.0) ; sinon un utilisateur de service dédié créé par `install.sh`, ou l'utilisateur de la session. |
+| `nobody` ne peut pas ouvrir d'appareil USB sur certaines versions de macOS | Fonctionne sur le macOS 26.5 testé (sonde : ouverture réussie sous `nobody`). L'option `-W` reste pour les autres cas ; envisager un utilisateur de service dédié créé par `install.sh`. |
 | macOS durcit `utun`, IOKit ou launchd | Garder la partie privilégiée minuscule ; tester chaque bêta de macOS ; la CI tourne sur deux versions. |
 | Android abandonne RNDIS pour NCM | Le projet devient inutile pour ces téléphones, ce qui est très bien ; suivre le support par appareil et le dire dans le README. |
 | Un téléphone malveillant | Il peut déjà proposer n'importe quelle configuration DHCP. Le superviseur valide ce qu'il applique, et la garde contre le chevauchement de sous-réseau ferme le cas du réseau local masqué. |
