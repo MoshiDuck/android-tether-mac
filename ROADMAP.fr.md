@@ -25,27 +25,35 @@ Objectif : un bogue dans le code qui lit des données du téléphone ou du rése
 - ✅ **Séparation des privilèges** — un petit superviseur root et un worker sans privilèges (`nobody`) ; IPC à messages de taille fixe ; chaque demande validée par `policy.c` ; un worker neuf par session. *Validée en réel sur le S24 Ultra (2026-11-06) :* `nobody` peut ouvrir l'appareil USB ; le service à deux processus a fait passer IPv4 et IPv6, résisté à l'interrupteur de l'icône et à une vraie coupure USB, et nettoyé routes et DNS à chaque fois. L'option `-W` reste disponible pour les systèmes où ce ne serait pas le cas.
 - ✅ **DHCP selon la RFC 2131** — renouvellement en unicast à T1, rebind en broadcast à T2, retransmissions, gestion de l'expiration et du NAK. *Validé en réel sur le S24 Ultra (2026-11-06) :* le renouvellement unicast à T1 a été accepté (`bail renouvelé`). Le rebind à T2 et l'expiration ne sont couverts que par des tests à horloge simulée.
 
-Publiée en 0.2.0. Les deux points ont été validés sur le Galaxy S24 Ultra ; le reste du durcissement passe en 0.3.0.
+Publiée en 0.2.0. Les deux points ont été validés sur le Galaxy S24 Ultra ; le reste du durcissement passe en 0.3.0 et 0.4.0.
 
-## 0.3.0 — Durcissement, confinement et observabilité
+## 0.3.0 — Durcissement, première partie  *(publiée le 2026-11-06)*
+
+Objectif : fermer les failles faciles à fermer et à forte valeur, laissées après la séparation des privilèges.
 
 - ✅ **`DHCPRELEASE` à l'arrêt**, pour ne pas laisser de baux orphelins dans le pool d'adresses du téléphone.
 - ✅ **Garde contre le chevauchement de sous-réseau** — refuser un sous-réseau du téléphone qui recouvre un réseau déjà utilisé par le Mac (un téléphone malveillant pourrait sinon masquer un réseau local). Message d'erreur clair, car un conflit légitime bloquerait le tethering.
-- ⬜ **Durcissement de l'abandon de privilèges** — limites de ressources (`RLIMIT_NPROC`, `RLIMIT_FSIZE`) et auto-test au démarrage prouvant que le worker a bien perdu root.
 - ✅ **Limitation de débit de l'IPC** — un worker qui envoie plus de 30 demandes en 10 secondes est tué et remplacé (un worker normal en fait moins de dix par session).
+- ✅ **`--version` et une page de manuel.**
+
+Publiée en 0.3.0. Validée sur le Galaxy S24 Ultra : `DHCPRELEASE` à la fin d'une session (ligne du journal), `--version` et la page de manuel, et aucun faux refus de la garde de sous-réseau, y compris avec le vrai Wi-Fi du Mac connecté. La limite de débit n'est couverte que par les tests.
+
+## 0.4.0 — Confinement et observabilité
+
+- ⬜ **Durcissement de l'abandon de privilèges** — limites de ressources (`RLIMIT_NPROC`, `RLIMIT_FSIZE`) et auto-test au démarrage prouvant que le worker a bien perdu root.
 - ⬜ **Chien de garde du worker** — remplacer aussi un worker qui ne répond plus (il faut un signal de vie, car un worker connecté est légitimement silencieux).
 - ⬜ **Hygiène des journaux** — droits et rotation de `/var/log/rndis-tether.log` (`newsyslog`) ; pas d'adresses d'autres appareils dans les logs.
-- ✅ **`--version` et une page de manuel.**
 - ⬜ **Profil de bac à sable macOS pour le worker** (Seatbelt, tout refusé par défaut ; seulement les classes IOKit USB, le socket IPC et la lecture du fichier d'état). Même un worker compromis ne pourrait plus ouvrir de fichiers ni de sockets.
 - ⬜ **`rndis-tether --diagnose`** — une commande qui produit un rapport partageable (descripteurs USB, résultat de la négociation RNDIS, échange DHCP, RA reçue, routes, état du DNS), sans secrets. C'est ce qui transforme un « ça ne marche pas » en problème réparable.
 - ⬜ **Gestion veille/réveil** — détecter le réveil du Mac, revérifier le bail et la liaison USB, reprendre proprement.
 - ⬜ **IPv6 complet** — suivre durées de vie et changements de préfixe des RA (aujourd'hui seule la première est utilisée), serveurs DNS RDNSS, option MTU de la RA, adresses temporaires optionnelles.
 - ⬜ **MTU et MSS TCP** — respecter la MTU du chemin, écrêtage du MSS optionnel pour les réseaux qui jettent les fragments.
 - ⬜ **`adb` robuste** — plusieurs appareils (`adb -s`), aucun autorisé, débogage USB désactivé : des messages clairs plutôt qu'un échec silencieux.
+- ⬜ **Garde contre la fuite IPv6** — avec `-r`, quand le tethering ne fournit pas d'IPv6 (par exemple parce que l'accès Internet du téléphone vient d'un Wi-Fi) mais qu'un autre réseau du Mac en a, le trafic IPv6 contourne le téléphone. Trouver une façon sûre de le bloquer (pour que les applications se rabattent sur l'IPv4 via le téléphone), et la tester sur un vrai téléphone.
 
 Critères de sortie : le bac à sable actif par défaut ; `--diagnose` cité dans les modèles de tickets ; veille/réveil testé.
 
-## 0.4.0 — Tests d'intégration sans matériel
+## 0.5.0 — Tests d'intégration sans matériel
 
 Aujourd'hui `main.c` n'est couvert qu'à 44 % ; la partie non testée est justement la boucle USB et de session que les vrais téléphones sollicitent.
 
@@ -59,7 +67,7 @@ Aujourd'hui `main.c` n'est couvert qu'à 44 % ; la partie non testée est justem
 
 Critères de sortie : `main.c` ≥ 80 % des lignes ; le faux téléphone couvre le cas nominal, chaque défaillance ci-dessus et le renouvellement ; le fuzzing tourne à intervalles réguliers.
 
-## 0.5.0 — Performance
+## 0.6.0 — Performance
 
 Mesuré jusqu'ici : ≈ 42 Mbit/s, limités par le réseau mobile et non par le driver. Avant d'optimiser, mesurer le driver seul.
 
@@ -70,7 +78,7 @@ Mesuré jusqu'ici : ≈ 42 Mbit/s, limités par le réseau mobile et non par le 
 
 Critères de sortie : chiffres documentés ; pas d'autre garde-fou de régression en CI qu'un seuil large.
 
-## 0.6.0 — Confort
+## 0.7.0 — Confort
 
 - ⬜ **Mode secours (failover)** — laisser la route par défaut tranquille et ne faire du tethering le service principal que si le Wi-Fi tombe (classer le service SystemConfiguration au lieu d'ajouter des routes scindées). Aujourd'hui `-r` fait passer *tout* par le téléphone, ce qui consomme des données mobiles.
 - ⬜ **Wi-Fi et tethering en même temps.** Aujourd'hui c'est l'un ou l'autre : une connexion passe par un seul lien, donc deux liens ne s'additionnent pas pour un seul téléchargement. Du plus réaliste au plus ambitieux : (1) le mode *secours* ci-dessus garde le tethering en réserve ; (2) un *équilibrage par flux* avec `pf` (`route-to`, collant par connexion) répartit plusieurs connexions simultanées sur les deux liens — utile pour des téléchargements en parallèle, pas pour un gros fichier unique, et certains sites n'aiment pas qu'un client change d'adresse ; (3) un vrai *regroupement* d'une seule connexion exige un serveur d'agrégation (de type MPTCP) et sort du cadre de ce projet. adresses IPv4/IPv6, compteurs de trafic, notifications de connexion/déconnexion, « ouvrir à la connexion », choix du mode (toujours / secours / arrêt).
@@ -78,7 +86,7 @@ Critères de sortie : chiffres documentés ; pas d'autre garde-fou de régressio
 - ⬜ **Localisation** (anglais, français).
 - ⬜ **Alerte de consommation** — afficher l'état « données limitées » du téléphone et un plafond configurable.
 
-## 0.7.0 — Compatibilité
+## 0.8.0 — Compatibilité
 
 - ⬜ **Matrice de téléphones** — Pixel, Xiaomi, OnePlus, Motorola, Sony et autres Samsung ; base d'identifiants USB avec les particularités de chaque appareil ; le formulaire *Phone report* alimente le tableau du README.
 - ⬜ **La direction d'Android.** Android sait maintenant aussi faire du CDC-NCM pour le partage USB, que macOS gère déjà nativement, et RNDIS est la voie plus ancienne. Un téléphone qui propose NCM n'a pas besoin de ce projet. Suivre quels appareils n'ont encore que RNDIS, et garder un périmètre honnête : cet outil existe pour eux.

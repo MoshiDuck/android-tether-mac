@@ -5,6 +5,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-06
+
+Hardening release: the subnet-overlap guard and the request rate limit tighten the supervisor, and the lease is now returned to the phone. Upgrade with `brew upgrade android-tether-mac && tethermac-install`.
+
 ### Security
 - **Subnet-overlap guard.** The supervisor refuses a phone subnet that overlaps an ordinary network (/16 to /30) already connected to the Mac, so a malicious phone cannot shadow a local network. Host addresses (a VPN /32) and very wide networks (a corporate /8) do not block tethering. `-O` accepts an overlap knowingly.
 - **Request rate limit.** A worker sending more than 30 requests in 10 seconds is killed and replaced.
@@ -12,6 +16,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 ### Added
 - `rndis-tether --version` / `-V`, a man page (`man rndis-tether`), and a `VERSION` file that the release script and workflow check against the tag.
 - The DHCP lease is returned to the server (`DHCPRELEASE`, RFC 2131 §3.1.7) when a session ends normally.
+
+### Changed
+- Coverage build artifacts that were committed by mistake in 0.2.0 are no longer tracked.
+
+### Known limitation
+- With `-r`, when the phone provides no IPv6 (for example because its own internet comes from Wi-Fi) but another network of the Mac does, IPv6 traffic keeps using that network instead of the phone. IPv4 is unaffected. See the roadmap.
 
 ## [0.2.0] - 2026-11-06
 
@@ -59,7 +69,8 @@ First public release.
 - Homebrew tap (`brew install MoshiDuck/tap/android-tether-mac`).
 - Tested on a Samsung Galaxy S24 Ultra (SM-S928B, Android 16, One UI 8).
 
-[Unreleased]: https://github.com/MoshiDuck/android-tether-mac/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/MoshiDuck/android-tether-mac/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/MoshiDuck/android-tether-mac/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/MoshiDuck/android-tether-mac/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/MoshiDuck/android-tether-mac/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/MoshiDuck/android-tether-mac/releases/tag/v0.1.0

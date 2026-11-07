@@ -105,7 +105,7 @@ This has only been tested on a **Samsung Galaxy S24 Ultra**. Other phones should
 
 ## Limitations
 
-- IPv6 needs the phone to advertise a `/64` prefix (it did on the tested phone); otherwise the tether stays IPv4-only. IPv6-only DNS servers announced by the router are not used. Use `-4` to turn IPv6 off. IPv6 is not faster than IPv4 here — the mobile network dominates
+- IPv6 needs the phone to advertise a `/64` prefix (it did on the tested phone, on mobile data); otherwise the tether stays IPv4-only. Android does not delegate a prefix when the phone's own internet comes from Wi-Fi. In that case, if another network of the Mac has IPv6, IPv6 traffic keeps using that network instead of the phone (IPv4 still goes through the phone). IPv6-only DNS servers announced by the router are not used. Use `-4` to turn IPv6 off. IPv6 is not faster than IPv4 here — the mobile network dominates
 - DHCP: the unicast renewal at T1 has been observed on the tested phone (RFC 2131 form, accepted by its server); the rebind at T2 and the expiry path are covered by simulated-clock tests but not yet seen on a real lease
 - If the supervisor is killed with `kill -9`, the routes `0.0.0.0/1` and `128.0.0.0/1` may remain: `sudo route -n delete -net 0.0.0.0/1` and `128.0.0.0/1`
 
