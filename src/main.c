@@ -32,6 +32,9 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "bytes.h"
+#include "dhcp.h"
+
 /* ---------- RNDIS ---------- */
 #define RNDIS_PACKET_MSG        0x00000001u
 #define RNDIS_INIT_MSG          0x00000002u
@@ -58,8 +61,10 @@ static int mps_out = 512;
 
 static volatile sig_atomic_t running = 1, quit;
 static int verbose, want_route, wait_mode, dns_applied, auto_adb;
-static uint32_t srv_ip, renew_period; /* DHCP: serveur et période de renouvellement (s) */
-static volatile uint32_t renew_xid;   /* xid de la dernière demande de renouvellement (0 = aucune en attente) */
+static uint32_t srv_ip;               /* DHCP : serveur */
+static struct dhcp_client dhcp_c;     /* cycle de vie du bail (voir dhcp.c) ; protégé par dhcp_lock */
+static int dhcp_active;               /* un bail est géré (session établie) */
+static pthread_mutex_t dhcp_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* IPv6 : adresse SLAAC construite à partir de la première annonce de routeur (RA) reçue */
 static int ipv6_on = 1;               /* -4 le désactive */
@@ -85,13 +90,14 @@ static void logf_(const char *fmt, ...) {
 #define LOG(...) logf_(__VA_ARGS__)
 #define VLOG(...) do { if (verbose) logf_(__VA_ARGS__); } while (0)
 
-static void put32(uint8_t *p, uint32_t v) { p[0] = v; p[1] = v >> 8; p[2] = v >> 16; p[3] = v >> 24; }
-static uint32_t get32(const uint8_t *p) { return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24; }
-static uint32_t be32(const uint8_t *p) { return (uint32_t)p[0] << 24 | p[1] << 16 | p[2] << 8 | p[3]; }
-static void putbe16(uint8_t *p, uint16_t v) { p[0] = v >> 8; p[1] = v; }
-static void putbe32(uint8_t *p, uint32_t v) { p[0] = v >> 24; p[1] = v >> 16; p[2] = v >> 8; p[3] = v; }
-
 static void on_signal(int s) { (void)s; running = 0; quit = 1; }
+
+/* Horloge monotone en secondes : continue d'avancer pendant la veille du Mac (comme le bail DHCP). */
+static int64_t now_s(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return t.tv_sec;
+}
 
 /* ---------- Contrôle par l'icône de barre de menus ----------
  * Le service tourne en root ; l'app (utilisateur) crée/supprime FLAG_DISABLED pour
@@ -240,73 +246,13 @@ static void rx_parse(const uint8_t *buf, int n, frame_cb cb, void *arg) {
 }
 
 /* ---------- DHCP client ---------- */
-struct lease { uint32_t ip, mask, gw, dns, srv, secs; uint8_t type; uint8_t srvmac[6]; };
-static const uint8_t cookie[4] = {0x63, 0x82, 0x53, 0x63};
-
-static uint16_t ip_csum(const uint8_t *p, int len) {
-    uint32_t s = 0;
-    for (int i = 0; i + 1 < len; i += 2) s += p[i] << 8 | p[i + 1];
-    while (s >> 16) s = (s & 0xffff) + (s >> 16);
-    return ~s;
-}
-
-static int build_dhcp(uint8_t *f, uint8_t type, uint32_t xid, uint32_t req_ip, uint32_t srv_ip) {
-    memset(f, 0, 600);
-    memset(f, 0xff, 6); memcpy(f + 6, my_mac, 6); putbe16(f + 12, 0x0800);
-    uint8_t *ip = f + 14, *udp = ip + 20, *b = udp + 8;
-    b[0] = 1; b[1] = 1; b[2] = 6;
-    putbe32(b + 4, xid);
-    putbe16(b + 10, 0x8000); /* réponse en broadcast */
-    memcpy(b + 28, my_mac, 6);
-    memcpy(b + 236, cookie, 4);
-    uint8_t *o = b + 240;
-    *o++ = 53; *o++ = 1; *o++ = type;
-    if (req_ip) { *o++ = 50; *o++ = 4; memcpy(o, &req_ip, 4); o += 4; }
-    if (srv_ip) { *o++ = 54; *o++ = 4; memcpy(o, &srv_ip, 4); o += 4; }
-    *o++ = 55; *o++ = 4; *o++ = 1; *o++ = 3; *o++ = 6; *o++ = 51;
-    *o++ = 255;
-    int blen = o - b; if (blen < 300) blen = 300;
-    int udplen = 8 + blen, iplen = 20 + udplen;
-    ip[0] = 0x45; putbe16(ip + 2, iplen); ip[8] = 64; ip[9] = 17;
-    memset(ip + 16, 0xff, 4);
-    putbe16(ip + 10, ip_csum(ip, 20));
-    putbe16(udp, 68); putbe16(udp + 2, 67); putbe16(udp + 4, udplen);
-    return 14 + iplen;
-}
-
-static int dhcp_parse(const uint8_t *f, int len, uint32_t xid, struct lease *L) {
-    if (len < 14 + 20 + 8 + 240 || f[12] != 0x08 || f[13] != 0x00) return -1;
-    const uint8_t *ip = f + 14;
-    int ihl = (ip[0] & 15) * 4;
-    if ((ip[0] >> 4) != 4 || ihl < 20 || len < 14 + ihl + 8 + 240 || ip[9] != 17) return -1;
-    const uint8_t *udp = ip + ihl, *b = udp + 8;
-    if ((udp[2] << 8 | udp[3]) != 68 || b[0] != 2 || be32(b + 4) != xid) return -1;
-    if (memcmp(b + 28, my_mac, 6) || memcmp(b + 236, cookie, 4)) return -1;
-    memset(L, 0, sizeof *L);
-    memcpy(&L->ip, b + 16, 4);
-    memcpy(L->srvmac, f + 6, 6);
-    const uint8_t *o = b + 240, *end = f + len;
-    while (o < end && *o != 255) {
-        if (*o == 0) { o++; continue; }
-        if (o + 2 > end || o + 2 + o[1] > end) break;
-        uint8_t code = o[0], l = o[1];
-        if (code == 53 && l >= 1) L->type = o[2];
-        else if (code == 1 && l >= 4) memcpy(&L->mask, o + 2, 4);
-        else if (code == 3 && l >= 4) memcpy(&L->gw, o + 2, 4);
-        else if (code == 6 && l >= 4) memcpy(&L->dns, o + 2, 4);
-        else if (code == 51 && l >= 4) L->secs = be32(o + 2);
-        else if (code == 54 && l >= 4) memcpy(&L->srv, o + 2, 4);
-        o += 2 + l;
-    }
-    return 0;
-}
-
+/* Construction, analyse et cycle de vie du bail : voir dhcp.c (testés sans USB ni horloge). */
 struct dhcp_wait { uint32_t xid; uint8_t want; struct lease L; int done, nak; };
 
 static void dhcp_cb(const uint8_t *f, int len, void *arg) {
     struct dhcp_wait *w = arg;
     struct lease L;
-    if (w->done || dhcp_parse(f, len, w->xid, &L) < 0) return;
+    if (w->done || dhcp_parse(f, len, my_mac, w->xid, &L) < 0) return;
     if (L.type == 6) { w->nak = 1; return; }
     if (L.type == w->want) { w->L = L; w->done = 1; }
 }
@@ -333,12 +279,12 @@ static int dhcp_acquire(struct lease *out) {
     for (int attempt = 1; attempt <= 6 && running; attempt++) {
         struct dhcp_wait w = {.xid = rand(), .want = 2};
         VLOG("DHCP DISCOVER (essai %d)", attempt);
-        send_frame(f, build_dhcp(f, 1, w.xid, 0, 0));
+        send_frame(f, dhcp_build(f, my_mac, 1, w.xid, 0, 0));
         if (dhcp_wait_for(&w, 3000) < 0) continue;
         struct lease offer = w.L;
         w.done = 0; w.want = 5;
         VLOG("DHCP OFFER %s, REQUEST", inet_ntoa((struct in_addr){offer.ip}));
-        send_frame(f, build_dhcp(f, 3, w.xid, offer.ip, offer.srv));
+        send_frame(f, dhcp_build(f, my_mac, 3, w.xid, offer.ip, offer.srv));
         if (dhcp_wait_for(&w, 3000) < 0) continue;
         *out = w.L;
         if (!out->gw) out->gw = out->srv;
@@ -610,12 +556,20 @@ static void rx_frame(const uint8_t *f, int len, void *arg) {
     if (et == 0x0806) { handle_arp(f, len); return; }
     if (et == 0x86DD) { if (ipv6_on) handle_ipv6(f, len); return; }
     if (et != 0x0800 || len < 34) return;
-    /* réponse du serveur DHCP à notre demande de renouvellement : on le consigne, sans le relayer */
-    if (renew_xid && f[23] == 17) {
+    /* réponse du serveur DHCP à notre demande de renouvellement : traitée ici, jamais relayée */
+    if (f[23] == 17 && dhcp_active) {
         struct lease L;
-        if (dhcp_parse(f, len, renew_xid, &L) == 0) {
-            if (L.type == 5) { LOG("DHCP: bail renouvelé (%us)", L.secs); renew_xid = 0; }
-            else if (L.type == 6) LOG("DHCP: renouvellement refusé (NAK)");
+        enum dhcp_input res = DHCP_IGNORED;
+        int match;
+        pthread_mutex_lock(&dhcp_lock);
+        match = dhcp_c.xid && dhcp_parse(f, len, my_mac, dhcp_c.xid, &L) == 0;
+        if (match) res = dhcp_client_input(&dhcp_c, &L, now_s());
+        uint32_t lease = dhcp_c.lease, t1 = dhcp_c.t1, t2 = dhcp_c.t2;
+        pthread_mutex_unlock(&dhcp_lock);
+        if (match) {
+            if (res == DHCP_ACKED) LOG("DHCP: bail renouvelé (%us, T1 %us, T2 %us)", lease, t1, t2);
+            else if (res == DHCP_NAKED) { LOG("DHCP: renouvellement refusé (NAK), relance de la session"); running = 0; }
+            else if (res == DHCP_ADDR_CHANGED) { LOG("DHCP: le serveur impose une autre adresse, relance de la session"); running = 0; }
             return;
         }
     }
@@ -688,14 +642,21 @@ static void *tx_thread(void *a) {
 static void *ctrl_thread(void *a) {
     (void)a;
     uint8_t n[16], resp[4096], f[700];
-    time_t next_renew = time(NULL) + renew_period, next_rs = time(NULL) + 1;
+    time_t next_rs = time(NULL) + 1;
     int rs_sent = 0;
     while (running) {
-        if (renew_period && time(NULL) >= next_renew) {
-            LOG("DHCP: demande de renouvellement");
-            renew_xid = arc4random() | 1;                     /* jamais 0 */
-            send_frame(f, build_dhcp(f, 3, renew_xid, my_ip, srv_ip));
-            next_renew += renew_period;
+        if (dhcp_active) {                                    /* T1 / T2 / expiration du bail (RFC 2131) */
+            pthread_mutex_lock(&dhcp_lock);
+            enum dhcp_action act = dhcp_client_tick(&dhcp_c, now_s(), arc4random() | 1);
+            struct dhcp_client snap = dhcp_c;
+            pthread_mutex_unlock(&dhcp_lock);
+            if (act == DHCP_SEND_RENEW || act == DHCP_SEND_REBIND) {
+                LOG("DHCP: %s", act == DHCP_SEND_RENEW ? "demande de renouvellement (unicast)" : "rebind (broadcast)");
+                send_frame(f, dhcp_build_renew(f, my_mac, snap.xid, snap.ip, snap.srvmac, snap.srv, act == DHCP_SEND_RENEW));
+            } else if (act == DHCP_RESTART) {
+                LOG("DHCP: bail expiré sans réponse du serveur, relance de la session");
+                running = 0;
+            }
         }
         if (ipv6_on) {
             if (__atomic_load_n(&v6_pending, __ATOMIC_ACQUIRE)) {
@@ -849,7 +810,8 @@ int main(int argc, char **argv) {
 
 static int session(void) {
     int rc = 1;
-    running = 1; utun_fd = -1; my_ip = gw_ip = srv_ip = renew_period = renew_xid = 0;
+    running = 1; utun_fd = -1; my_ip = gw_ip = srv_ip = 0;
+    dhcp_active = 0; memset(&dhcp_c, 0, sizeof dhcp_c);
     v6_claimed = v6_pending = v6_routes = v6_svc = 0;
     status_tick("connecting");
     if (libusb_claim_interface(h, ctrl_if) || libusb_claim_interface(h, data_if)) {
@@ -862,8 +824,12 @@ static int session(void) {
     struct lease L;
     LOG("DHCP en cours sur %s…", utun_name);
     if (dhcp_acquire(&L) < 0) { LOG("Pas de réponse DHCP du téléphone"); goto out; }
+    if (!L.srv) L.srv = L.gw;                                 /* serveur sans option 54 : on suppose le routeur */
     my_ip = L.ip; gw_ip = L.gw; srv_ip = L.srv; memcpy(gw_mac, L.srvmac, 6);
-    renew_period = L.secs >= 120 ? L.secs / 2 : 60;
+    pthread_mutex_lock(&dhcp_lock);
+    dhcp_client_bound(&dhcp_c, &L, now_s());
+    dhcp_active = 1;
+    pthread_mutex_unlock(&dhcp_lock);
     char a[16], g[16], d[16];
     ipstr(L.ip, a); ipstr(L.gw, g); ipstr(L.dns, d);
     LOG("%s: IP %s, passerelle %s, DNS %s, bail %us", utun_name, a, g, L.dns ? d : "-", L.secs);

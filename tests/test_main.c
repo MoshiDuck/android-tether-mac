@@ -1,20 +1,18 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 /*
  * Tests unitaires et de robustesse du driver, sans téléphone ni root.
- * On inclut main.c directement pour atteindre ses fonctions static ; main() est renommé.
+ * On inclut src/main.c directement pour atteindre ses fonctions static ; main() est renommé.
  * Les données venant du téléphone sont considérées comme hostiles : les tests de
  * « fuzz » tournent sous AddressSanitizer/UBSan (voir le Makefile).
  */
 #define main rndis_tether_main
-#include "../main.c"
+#include "../src/main.c"
 #undef main
 #include <fcntl.h>
 
-static int checks, failures;
-#define CHECK(cond) do { \
-        checks++; \
-        if (!(cond)) { failures++; fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); } \
-    } while (0)
+#include "check.h"
+int checks, failures;
+void run_dhcp_tests(void);
 
 static const uint8_t TEST_MAC[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x55};
 
@@ -69,7 +67,7 @@ static const uint8_t *find_option(const uint8_t *opts, const uint8_t *end, uint8
 static void test_build_dhcp(void) {
     memcpy(my_mac, TEST_MAC, 6);
     uint8_t f[700];
-    int n = build_dhcp(f, 1, 0xDEADBEEFu, 0, 0);
+    int n = dhcp_build(f, my_mac, 1, 0xDEADBEEFu, 0, 0);
     CHECK(n == 342);                              /* 14 + 20 + 8 + 300 */
     static const uint8_t bcast[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
     CHECK(!memcmp(f, bcast, 6) && !memcmp(f + 6, TEST_MAC, 6));
@@ -83,12 +81,12 @@ static void test_build_dhcp(void) {
     CHECK(b[0] == 1 && b[1] == 1 && b[2] == 6);
     CHECK(be32(b + 4) == 0xDEADBEEFu);
     CHECK((b[10] << 8 | b[11]) == 0x8000);        /* broadcast demandé */
-    CHECK(!memcmp(b + 28, TEST_MAC, 6) && !memcmp(b + 236, cookie, 4));
+    CHECK(!memcmp(b + 28, TEST_MAC, 6) && !memcmp(b + 236, dhcp_cookie, 4));
     const uint8_t *o = find_option(b + 240, f + n, 53);
     CHECK(o && o[2] == 1);                        /* DISCOVER */
     CHECK(find_option(b + 240, f + n, 50) == NULL);
 
-    n = build_dhcp(f, 3, 1, ip4(10, 0, 0, 5), ip4(10, 0, 0, 1));
+    n = dhcp_build(f, my_mac, 3, 1, ip4(10, 0, 0, 5), ip4(10, 0, 0, 1));
     b = f + 14 + 20 + 8;
     o = find_option(b + 240, f + n, 53);
     CHECK(o && o[2] == 3);                        /* REQUEST */
@@ -100,7 +98,7 @@ static void test_build_dhcp(void) {
 
 /* Fabrique une réponse serveur valide à partir d'une trame client. */
 static int make_reply(uint8_t *f, uint32_t xid, uint8_t type, const uint8_t *opts, int optlen) {
-    build_dhcp(f, 1, xid, 0, 0);
+    dhcp_build(f, my_mac, 1, xid, 0, 0);
     uint8_t *ip = f + 14, *udp = ip + 20, *b = udp + 8;
     putbe16(udp, 67); putbe16(udp + 2, 68);
     b[0] = 2;
@@ -125,7 +123,7 @@ static void test_dhcp_parse(void) {
     };
     struct lease L;
     int n = make_reply(f, 0xCAFEF00Du, 2, opts, sizeof opts);
-    CHECK(dhcp_parse(f, n, 0xCAFEF00Du, &L) == 0);
+    CHECK(dhcp_parse(f, n, my_mac, 0xCAFEF00Du, &L) == 0);
     CHECK(L.type == 2);
     CHECK(L.ip == ip4(10, 217, 123, 144) && L.mask == ip4(255, 255, 255, 0));
     CHECK(L.gw == ip4(10, 217, 123, 221) && L.dns == ip4(10, 217, 123, 221));
@@ -133,26 +131,26 @@ static void test_dhcp_parse(void) {
     CHECK(!memcmp(L.srvmac, (uint8_t[]){0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff}, 6));
 
     /* réponses à rejeter */
-    CHECK(dhcp_parse(f, n, 0x1111u, &L) < 0);                   /* mauvais xid */
+    CHECK(dhcp_parse(f, n, my_mac, 0x1111u, &L) < 0);                   /* mauvais xid */
     uint8_t g[700];
     memcpy(g, f, n); g[14 + 20 + 8 + 28] ^= 0xff;
-    CHECK(dhcp_parse(g, n, 0xCAFEF00Du, &L) < 0);               /* mauvaise MAC cliente */
+    CHECK(dhcp_parse(g, n, my_mac, 0xCAFEF00Du, &L) < 0);               /* mauvaise MAC cliente */
     memcpy(g, f, n); g[14 + 20 + 8 + 236] ^= 0xff;
-    CHECK(dhcp_parse(g, n, 0xCAFEF00Du, &L) < 0);               /* mauvais cookie */
+    CHECK(dhcp_parse(g, n, my_mac, 0xCAFEF00Du, &L) < 0);               /* mauvais dhcp_cookie */
     memcpy(g, f, n); g[14 + 20 + 3] = 99;
-    CHECK(dhcp_parse(g, n, 0xCAFEF00Du, &L) < 0);               /* mauvais port UDP */
+    CHECK(dhcp_parse(g, n, my_mac, 0xCAFEF00Du, &L) < 0);               /* mauvais port UDP */
     memcpy(g, f, n); g[14 + 20 + 8] = 1;
-    CHECK(dhcp_parse(g, n, 0xCAFEF00Du, &L) < 0);               /* op=requête, pas réponse */
-    CHECK(dhcp_parse(f, 100, 0xCAFEF00Du, &L) < 0);             /* trame tronquée */
+    CHECK(dhcp_parse(g, n, my_mac, 0xCAFEF00Du, &L) < 0);               /* op=requête, pas réponse */
+    CHECK(dhcp_parse(f, 100, my_mac, 0xCAFEF00Du, &L) < 0);             /* trame tronquée */
 
     /* NAK */
     n = make_reply(f, 7, 6, (const uint8_t *)"", 0);
-    CHECK(dhcp_parse(f, n, 7, &L) == 0 && L.type == 6);
+    CHECK(dhcp_parse(f, n, my_mac, 7, &L) == 0 && L.type == 6);
 
     /* option qui annonce une longueur dépassant la trame : ne doit rien lire au-delà */
     const uint8_t evil[] = {6, 200, 1, 2, 3};
     n = make_reply(f, 8, 2, evil, sizeof evil);
-    CHECK(dhcp_parse(f, n, 8, &L) == 0 && L.dns == 0);
+    CHECK(dhcp_parse(f, n, my_mac, 8, &L) == 0 && L.dns == 0);
 }
 
 /* ---------- parsing RNDIS reçu ---------- */
@@ -263,11 +261,11 @@ static void test_fuzz(void) {
             p[14 + 20 + 2] = 0; p[14 + 20 + 3] = 68;
             p[14 + 20 + 8] = 2;
             memcpy(p + 14 + 20 + 8 + 28, TEST_MAC, 6);
-            memcpy(p + 14 + 20 + 8 + 236, cookie, 4);
+            memcpy(p + 14 + 20 + 8 + 236, dhcp_cookie, 4);
             uint32_t x = rnd(); putbe32(p + 14 + 20 + 8 + 4, x);
-            dhcp_parse(p, len, x, &L);
+            dhcp_parse(p, len, my_mac, x, &L);
         } else {
-            dhcp_parse(p, len, rnd(), &L);
+            dhcp_parse(p, len, my_mac, rnd(), &L);
         }
         uint8_t mac[6];
         if (len >= 28) rndis_parse_mac(p, len, mac);
@@ -515,18 +513,24 @@ static void test_handle_ipv6(void) {
     CHECK(1);
 }
 
-/* Le renouvellement DHCP est consigné quand le serveur répond ACK (sans relayer la trame). */
+/* Le client DHCP traite l'ACK d'un renouvellement reçu par rx_frame (sans relayer la trame). */
 static void test_renew_ack(void) {
     memcpy(my_mac, TEST_MAC, 6);
     uint8_t f[700];
+    struct lease first = {.ip = ip4(10, 217, 123, 144), .srv = ip4(10, 217, 123, 221), .secs = 3600};
+    memset(&dhcp_c, 0, sizeof dhcp_c);
+    dhcp_client_bound(&dhcp_c, &first, 1000);
+    dhcp_active = 1;
+    CHECK(dhcp_client_tick(&dhcp_c, 1000 + 1800, 0x1234ABCDu) == DHCP_SEND_RENEW);
     int n = make_reply(f, 0x1234ABCDu, 5, (const uint8_t[]){51, 4, 0, 0, 0x0e, 0x10}, 6);
-    renew_xid = 0x1234ABCDu;
     rx_frame(f, n, NULL);
-    CHECK(renew_xid == 0);                                                 /* ACK reconnu */
-    renew_xid = 0x1111u;
-    rx_frame(f, n, NULL);
-    CHECK(renew_xid == 0x1111u);                                           /* autre xid : ignoré */
-    renew_xid = 0;
+    CHECK(dhcp_c.state == DHCP_BOUND && dhcp_c.xid == 0);                  /* ACK reconnu */
+
+    dhcp_client_tick(&dhcp_c, now_s() + 1800, 0x1111u);                    /* nouveau T1 : retour en renouvellement */
+    CHECK(dhcp_c.xid == 0x1111u);
+    rx_frame(f, n, NULL);                                                  /* ACK d'un autre xid : ignoré */
+    CHECK(dhcp_c.xid == 0x1111u);
+    dhcp_active = 0;
 }
 
 int main(void) {
@@ -544,6 +548,7 @@ int main(void) {
     test_parse_ra();
     test_handle_ipv6();
     test_renew_ack();
+    run_dhcp_tests();
     printf("%d vérifications, %d échec(s)\n", checks, failures);
     return failures ? 1 : 0;
 }
