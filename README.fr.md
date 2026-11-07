@@ -46,6 +46,7 @@ sudo ./rndis-tether -v -r -w -a
 - `-L` avec `-r`, laisse l'IPv6 sortir par les autres réseaux du Mac quand le tethering n'en a pas (sinon elle est bloquée)
 - `-O` accepte un sous-réseau du téléphone qui recouvre un réseau déjà utilisé (refusé par défaut)
 - `-V`, `--version` affiche la version
+- `--diagnose` affiche un rapport à joindre à un ticket (sans `sudo` ; adresses MAC, IP publiques et numéros de série masqués)
 - `-U user` utilisateur pour `adb` (défaut `$SUDO_USER`)
 - `-d vid:pid` cible un appareil précis ; `-v` logs détaillés
 

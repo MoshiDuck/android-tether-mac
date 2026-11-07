@@ -33,6 +33,9 @@ jobs:
         run: |
           make
           ./rndis-tether --version
+          ./rndis-tether --diagnose | tee diagnose.txt
+          grep -q '== Diagnostic ==' diagnose.txt
+          ! grep -qE '[0-9a-f]{2}(:[0-9a-f]{2}){5}' diagnose.txt || { echo 'une adresse MAC complète est dans le rapport' >&2; exit 1; }
 
       - name: Unit, state-machine and fuzz tests (ASan + UBSan)
         run: make test
@@ -67,7 +70,7 @@ jobs:
       - name: Coverage report and thresholds
         run: |
           make coverage | tee coverage.txt
-          scripts/check-coverage.sh coverage.txt dhcp.c=95 policy.c=95 ipc.c=95 TOTAL=50
+          scripts/check-coverage.sh coverage.txt dhcp.c=95 policy.c=95 ipc.c=95 diagnose.c=95 TOTAL=50
 
       - name: Upload coverage report
         if: always()

@@ -10,6 +10,9 @@ rndis-tether \- USB tethering from Android phones on macOS
 .br
 .B rndis-tether
 \fB\-\-version\fR | \fB\-V\fR
+.br
+.B rndis-tether
+\fB\-\-diagnose\fR
 .SH DESCRIPTION
 .B rndis-tether
 gives the Mac internet access through an Android phone's USB tethering, without any kernel extension.
@@ -82,6 +85,9 @@ Verbose logs.
 .TP
 .BR \-V ", " \-\-version
 Print the version and exit.
+.TP
+.B \-\-diagnose
+Print a report for bug reports and exit. It needs no privileges and changes nothing. It shows the version, the state of the service (supervisor and worker), the USB devices that have a network, ADB or MTP interface, the ADB state, the tether's IPv4 and IPv6 routes, the DNS resolvers, the end of the log, and a plain-language diagnosis. MAC addresses are cut after the vendor part, public IPv4 and global IPv6 addresses are masked, and ADB serial numbers are not shown. Read the report before you publish it.
 .SH FILES
 .TP
 .I /var/log/rndis-tether.log

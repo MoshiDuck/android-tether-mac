@@ -78,6 +78,7 @@ sudo ./rndis-tether -v -r -w -a
 | `-L` | With `-r`, let IPv6 leave through the Mac's other networks when the tether has none (otherwise it is blocked) |
 | `-O` | Accept a phone subnet that overlaps a network already in use (refused by default) |
 | `-V`, `--version` | Print the version |
+| `--diagnose` | Print a report for bug reports (no `sudo`; MAC addresses, public IPs and serial numbers are masked) |
 | `-U user` | User to run `adb` as (default `$SUDO_USER`; set by the LaunchDaemon) |
 | `-d vid:pid` | Target a specific device (hex) |
 | `-v` | Verbose logs |

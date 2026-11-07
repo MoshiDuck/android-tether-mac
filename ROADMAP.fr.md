@@ -44,7 +44,7 @@ Publiée en 0.3.0. Validée sur le Galaxy S24 Ultra : `DHCPRELEASE` à la fin d'
 - ⬜ **Chien de garde du worker** — remplacer aussi un worker qui ne répond plus (il faut un signal de vie, car un worker connecté est légitimement silencieux).
 - ⬜ **Hygiène des journaux** — droits et rotation de `/var/log/rndis-tether.log` (`newsyslog`) ; pas d'adresses d'autres appareils dans les logs.
 - ⬜ **Profil de bac à sable macOS pour le worker** (Seatbelt, tout refusé par défaut ; seulement les classes IOKit USB, le socket IPC et la lecture du fichier d'état). Même un worker compromis ne pourrait plus ouvrir de fichiers ni de sockets.
-- ⬜ **`rndis-tether --diagnose`** — une commande qui produit un rapport partageable (descripteurs USB, résultat de la négociation RNDIS, échange DHCP, RA reçue, routes, état du DNS), sans secrets. C'est ce qui transforme un « ça ne marche pas » en problème réparable.
+- ✅ **`rndis-tether --diagnose`** — une commande, sans `sudo`, qui produit un rapport partageable : état du service (superviseur et worker), interfaces USB, état d'ADB, routes, DNS, fin du journal et diagnostic en langage clair. Adresses MAC, IP publiques et numéros de série masqués. Reste à ajouter : la négociation RNDIS et l'échange DHCP de la dernière session.
 - ⬜ **Gestion veille/réveil** — détecter le réveil du Mac, revérifier le bail et la liaison USB, reprendre proprement.
 - ⬜ **IPv6 complet** — suivre durées de vie et changements de préfixe des RA (aujourd'hui seule la première est utilisée), serveurs DNS RDNSS, option MTU de la RA, adresses temporaires optionnelles.
 - ⬜ **MTU et MSS TCP** — respecter la MTU du chemin, écrêtage du MSS optionnel pour les réseaux qui jettent les fragments.

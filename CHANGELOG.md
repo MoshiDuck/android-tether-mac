@@ -5,6 +5,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Added
+- **`rndis-tether --diagnose`**: a report for bug reports, with no `sudo` and no changes to the system. It shows the service (supervisor and worker), the USB devices with a network, ADB or MTP interface, the ADB state, the IPv4 and IPv6 routes of the tether, the DNS resolvers, the end of the log and a plain-language diagnosis (cable, tethering not enabled, service stopped, disabled from the menu, IPv6 blocked by the leak guard…). MAC addresses are cut after the vendor part, public IPv4 and global IPv6 addresses are masked and ADB serial numbers are not shown. The bug report form now asks for it.
+
 ### Security
 - **IPv6 leak guard.** With `-r`, when the tether provides no IPv6 (for example because the phone's own internet comes from Wi-Fi), the supervisor installs two `reject` routes (`::/1` and `8000::/1`) so that the Mac's IPv6 traffic cannot bypass the phone through another network; applications fall back to IPv4, which goes through the phone, and local IPv6 networks stay reachable. When the tether does get IPv6, the `reject` routes are replaced by the real routes. They are removed at the end of the session and when the service starts. `-L` restores the previous behaviour.
 
