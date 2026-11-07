@@ -267,6 +267,77 @@ static void test_sup_ipv6_leak_guard(void) {
     sup_reset();
 }
 
+/* Le téléphone perd son IPv6 en cours de session : le superviseur retire tout et remet le blocage. */
+static void test_sup_deconfig6(void) {
+    struct ipc_msg rp;
+    int fd = -1;
+    uint8_t d6[32];
+    memcpy(d6, GLOBAL6, 16); memcpy(d6 + 16, ROUTER6, 16);
+    const char *rej_a = "/sbin/route -q -n add -inet6 -net ::/1 ::1 -reject";
+    const char *rej_del = "/sbin/route -q -n delete -inet6 -net ::/1 ::1";
+    const char *alias_del = "/sbin/ifconfig utun99 inet6 2600:383:a44:4d02:1d71:d2af:4eb6:a5bb -alias";
+
+    sup_reset();
+    CHECK(sup_call(msg(IPC_REQ_DECONFIG6, NULL, 0), &rp, &fd) == 1 && rp.status == 200);       /* rien à retirer */
+    sup_utun();
+    CHECK(sup_call(msg(IPC_REQ_CONFIG4, CFG4_OK, 16), &rp, &fd) == 1 && rp.status == 0);
+    CHECK(sup_call(msg(IPC_REQ_DECONFIG6, NULL, 0), &rp, &fd) == 1 && rp.status == 200);       /* pas encore d'IPv6 */
+    CHECK(sup_call(msg(IPC_REQ_CONFIG6, d6, 32), &rp, &fd) == 1 && rp.status == 0);
+    CHECK(cfg6_done && v6_routes && v6_svc && !v6_blocked);
+    ncmds = 0;
+
+    CHECK(sup_call(msg(IPC_REQ_DECONFIG6, d6, 32), &rp, &fd) == 1 && rp.status == 200);        /* pas de données attendues */
+    CHECK(ncmds == 0 && cfg6_done);
+
+    CHECK(sup_call(msg(IPC_REQ_DECONFIG6, NULL, 0), &rp, &fd) == 1 && rp.status == 0);
+    CHECK(cmd_has("remove State:/Network/Service/rndis-tether/IPv6"));
+    CHECK(cmd_has("/sbin/route -q -n delete -inet6 -net ::/1 -interface utun99"));
+    CHECK(cmd_has("/sbin/route -q -n delete -inet6 -net 8000::/1 -interface utun99"));
+    CHECK(cmd_has(alias_del));
+    CHECK(cmd_has(rej_a) && cmd_has("/sbin/route -q -n add -inet6 -net 8000::/1 ::1 -reject"));
+    CHECK(!cfg6_done && !v6_routes && !v6_svc && v6_blocked == 1);
+    /* ordre : les vraies routes partent avant que le blocage ne les remplace */
+    CHECK(cmd_index("delete -inet6 -net ::/1 -interface utun99") < cmd_index(rej_a));
+    CHECK(cmd_index("delete -inet6 -net 8000::/1 -interface utun99") < cmd_index("add -inet6 -net 8000::/1 ::1 -reject"));
+
+    int n = ncmds;
+    CHECK(sup_call(msg(IPC_REQ_DECONFIG6, NULL, 0), &rp, &fd) == 1 && rp.status == 200);      /* une seule fois */
+    CHECK(ncmds == n);
+
+    ncmds = 0;                                                       /* l'IPv6 revient : tout est réinstallé */
+    CHECK(sup_call(msg(IPC_REQ_CONFIG6, d6, 32), &rp, &fd) == 1 && rp.status == 0);
+    CHECK(cmd_has(rej_del) && cmd_has("/sbin/route -q -n add -inet6 -net ::/1 -interface utun99"));
+    CHECK(cfg6_done && v6_blocked == 0 && v6_routes && v6_svc);
+
+    unconfigure_iface();                                             /* fin de session : rien ne reste */
+    CHECK(!v6_routes && !v6_svc && !v6_blocked);
+
+    sup_reset();                                                     /* -L : retrait sans blocage */
+    allow_v6_leak = 1;
+    sup_utun();
+    CHECK(sup_call(msg(IPC_REQ_CONFIG4, CFG4_OK, 16), &rp, &fd) == 1 && rp.status == 0);
+    CHECK(sup_call(msg(IPC_REQ_CONFIG6, d6, 32), &rp, &fd) == 1 && rp.status == 0);
+    ncmds = 0;
+    CHECK(sup_call(msg(IPC_REQ_DECONFIG6, NULL, 0), &rp, &fd) == 1 && rp.status == 0);
+    CHECK(cmd_has(alias_del) && !cmd_has("-reject") && v6_blocked == 0);
+
+    sup_reset();                                                     /* sans -r : pas de routes à retirer, ni de blocage */
+    want_route = 0;
+    sup_utun();
+    CHECK(sup_call(msg(IPC_REQ_CONFIG4, CFG4_OK, 16), &rp, &fd) == 1 && rp.status == 0);
+    CHECK(sup_call(msg(IPC_REQ_CONFIG6, d6, 32), &rp, &fd) == 1 && rp.status == 0);
+    ncmds = 0;
+    CHECK(sup_call(msg(IPC_REQ_DECONFIG6, NULL, 0), &rp, &fd) == 1 && rp.status == 0);
+    CHECK(cmd_has(alias_del) && !cmd_has("-reject") && !cmd_has("route"));
+
+    sup_reset();                                                     /* -4 : jamais */
+    ipv6_on = 0;
+    sup_utun();
+    CHECK(sup_call(msg(IPC_REQ_CONFIG4, CFG4_OK, 16), &rp, &fd) == 1 && rp.status == 0);
+    CHECK(sup_call(msg(IPC_REQ_DECONFIG6, NULL, 0), &rp, &fd) == 1 && rp.status == 200);
+    sup_reset();
+}
+
 static void test_sup_status(void) {
     sup_reset();
     struct ipc_msg rp;
@@ -460,6 +531,7 @@ static void run_supervisor_tests(void) {
     test_sup_overlap();
     test_sup_ipv6_leak_guard();
     test_sup_config6();
+    test_sup_deconfig6();
     test_sup_status();
     test_sup_adb();
     test_sup_unknown();

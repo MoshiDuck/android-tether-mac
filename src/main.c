@@ -90,7 +90,10 @@ static uint8_t v6_addr[16], v6_router[16];
 static int v6_svc;                    /* service IPv6 déclaré dans SystemConfiguration (pour que macOS demande les AAAA) */
 static int v6_claimed;               /* une RA exploitable a déjà été prise en compte */
 static int v6_pending;                /* adresse prête, à configurer par le thread de contrôle */
+static int v6_withdraw;               /* le téléphone n'offre plus d'IPv6 : à retirer par le thread de contrôle */
+static int64_t v6_expire;             /* fin de validité du routeur (now_s) ; 0 = pas de suivi */
 static int v6_routes;                 /* routes ::/1 et 8000::/1 installées */
+static int cfg4_done, cfg6_done;        /* superviseur : configuration déjà appliquée pour le worker courant */
 static int v6_blocked;                /* routes « reject » installées : l'IPv6 ne peut pas fuir par un autre réseau */
 static int allow_v6_leak;             /* -L : ne pas bloquer l'IPv6 hors tethering */
 static int utun_fd = -1;
@@ -185,6 +188,10 @@ static void request_config6(void) {
     uint8_t d[32];
     memcpy(d, v6_addr, 16); memcpy(d + 16, v6_router, 16);
     if (ipc_call(IPC_REQ_CONFIG6, d, sizeof d, NULL, NULL, 30000) > 0) LOG("IPv6: configuration refusée par le superviseur");
+}
+
+static void request_deconfig6(void) {
+    if (ipc_call(IPC_REQ_DECONFIG6, NULL, 0, NULL, NULL, 30000) > 0) LOG("IPv6: retrait refusé par le superviseur");
 }
 
 static void request_adb(void) { ipc_call(IPC_REQ_ADB, NULL, 0, NULL, NULL, 90000); }
@@ -520,7 +527,8 @@ static int build_na(uint8_t *out, const uint8_t *f, int len) {
     return 14 + 40 + 32;
 }
 
-struct ra { int have_prefix; uint8_t prefix[16]; uint8_t plen; uint16_t router_lifetime; uint8_t router[16]; };
+struct ra { int have_prefix; uint8_t prefix[16]; uint8_t plen; uint16_t router_lifetime; uint8_t router[16];
+            int gone; uint8_t gone_prefix[8]; };      /* gone : un /64 auto-configurable annoncé avec une durée de validité nulle */
 
 /* Analyse une annonce de routeur (RA). Tout vient du réseau : bornes vérifiées à chaque option.
  * Retourne 0 si c'est une RA valide (have_prefix indique si un préfixe /64 auto-configurable y figure). */
@@ -540,15 +548,18 @@ static int parse_ra(const uint8_t *f, int len, struct ra *r) {
     while (o + 2 <= end) {
         int l = o[1] * 8;
         if (l == 0 || o + l > end) break;
-        if (o[0] == 3 && l >= 32 && !r->have_prefix) {               /* Prefix Information */
+        if (o[0] == 3 && l >= 32) {                                  /* Prefix Information */
             const uint8_t *p = o + 16;
             int onlink_auto = (o[3] & 0x40) != 0;                    /* drapeau A : SLAAC autorisé */
             int link_local = p[0] == 0xfe && (p[1] & 0xc0) == 0x80;
-            if (o[2] == 64 && onlink_auto && be32(o + 4) > 0 && p[0] != 0xff && !link_local &&
-                memcmp(p, zero8, 8)) {
+            int usable = o[2] == 64 && onlink_auto && p[0] != 0xff && !link_local && memcmp(p, zero8, 8);
+            if (usable && be32(o + 4) > 0 && !r->have_prefix) {
                 memcpy(r->prefix, p, 16);
                 r->plen = o[2];
                 r->have_prefix = 1;
+            } else if (usable && be32(o + 4) == 0 && !r->gone) {     /* préfixe retiré par le routeur */
+                memcpy(r->gone_prefix, p, 8);
+                r->gone = 1;
             }
         }
         o += l;
@@ -612,8 +623,8 @@ static void configure_ipv6(void) {
     }
 }
 
-static void unconfigure_iface(void) {
-    unblock_ipv6();
+/* Retire le service IPv6 et les routes du tethering (pas l'adresse : l'interface disparaît avec la session). */
+static void teardown_ipv6_routes(void) {
     if (v6_svc) {
         scutil_run("remove State:/Network/Service/rndis-tether/IPv6\n");
         v6_svc = 0;
@@ -623,6 +634,24 @@ static void unconfigure_iface(void) {
         sh("/sbin/route -q -n delete -inet6 -net 8000::/1 -interface %s", utun_name);
         v6_routes = 0;
     }
+}
+
+/* Le téléphone n'a plus d'IPv6 en cours de session (son internet est passé sur le Wi-Fi, par exemple) :
+ * on retire ce qu'on avait installé et on remet le blocage, sinon l'IPv6 du Mac repartirait par un autre réseau
+ * ou resterait sans réponse jusqu'au délai d'expiration. Une nouvelle RA avec préfixe réinstalle tout. */
+static void deconfigure_ipv6(void) {
+    char a[INET6_ADDRSTRLEN];
+    inet_ntop(AF_INET6, v6_addr, a, sizeof a);
+    teardown_ipv6_routes();
+    sh("/sbin/ifconfig %s inet6 %s -alias", utun_name, a);
+    cfg6_done = 0;
+    block_ipv6();
+    LOG("IPv6: retiré (le téléphone n'en fournit plus)");
+}
+
+static void unconfigure_iface(void) {
+    unblock_ipv6();
+    teardown_ipv6_routes();
     if (dns_applied) {
         scutil_run("remove State:/Network/Service/rndis-tether/DNS\nremove State:/Network/Service/rndis-tether/IPv4\n");
         dns_applied = 0;
@@ -651,7 +680,36 @@ static void handle_arp(const uint8_t *f, int len) {
     }
 }
 
-/* IPv6 reçu du téléphone : répond aux NS, exploite la première RA, relaie le reste vers utun. */
+/* Une RA valide arrive. Sans adresse : on prend le premier préfixe utilisable d'un routeur par défaut
+ * (durée de vie > 0, RFC 4861 : sinon ce n'est pas un routeur par défaut). Avec une adresse : seul notre routeur
+ * compte ; une durée de vie nulle ou le retrait de notre préfixe signifie que le téléphone n'a plus d'IPv6,
+ * et chaque RA normale repousse l'échéance. */
+static void ra_apply(const struct ra *r, int64_t now) {
+    if (!v6_claimed) {
+        if (!r->have_prefix || r->router_lifetime == 0) return;
+        v6_claimed = 1;
+        v6_expire = now + r->router_lifetime;
+        __atomic_store_n(&v6_withdraw, 0, __ATOMIC_RELAXED);
+        memcpy(v6_router, r->router, 16);
+        memcpy(v6_addr, r->prefix, 8);
+        do { arc4random_buf(v6_addr + 8, 8); v6_addr[8] &= ~0x02; }     /* identifiant aléatoire, non EUI-64 */
+        while (!memcmp(v6_addr + 8, (uint8_t[8]){0}, 8));
+        __atomic_store_n(&v6_pending, 1, __ATOMIC_RELEASE);
+        return;
+    }
+    if (memcmp(r->router, v6_router, 16)) return;                    /* une RA d'un autre routeur ne nous concerne pas */
+    if (r->router_lifetime == 0 || (r->gone && !memcmp(r->gone_prefix, v6_addr, 8)))
+        __atomic_store_n(&v6_withdraw, 1, __ATOMIC_RELEASE);
+    else v6_expire = now + r->router_lifetime;
+}
+
+/* Vrai quand l'IPv6 obtenu n'est plus valable : retrait annoncé, ou plus aucune RA avant l'échéance. */
+static int v6_lost(int64_t now) {
+    if (!v6_claimed || __atomic_load_n(&v6_pending, __ATOMIC_ACQUIRE)) return 0;
+    return __atomic_load_n(&v6_withdraw, __ATOMIC_ACQUIRE) || (v6_expire && now > v6_expire);
+}
+
+/* IPv6 reçu du téléphone : répond aux NS, exploite les RA, relaie le reste vers utun. */
 static void handle_ipv6(const uint8_t *f, int len) {
     if (len < 14 + 40) return;
     const uint8_t *ip = f + 14;
@@ -666,14 +724,7 @@ static void handle_ipv6(const uint8_t *f, int len) {
         }
         if (ip[40] == 134) {                              /* annonce de routeur : on s'en sert, le noyau ne la voit pas */
             struct ra r;
-            if (parse_ra(f, 14 + n, &r) == 0 && r.have_prefix && !v6_claimed) {
-                v6_claimed = 1;
-                memcpy(v6_router, r.router, 16);
-                memcpy(v6_addr, r.prefix, 8);
-                do { arc4random_buf(v6_addr + 8, 8); v6_addr[8] &= ~0x02; } /* identifiant aléatoire, non EUI-64 */
-                while (!memcmp(v6_addr + 8, (uint8_t[8]){0}, 8));
-                __atomic_store_n(&v6_pending, 1, __ATOMIC_RELEASE);
-            }
+            if (parse_ra(f, 14 + n, &r) == 0) ra_apply(&r, now_s());
             return;
         }
     }
@@ -796,12 +847,18 @@ static void *ctrl_thread(void *a) {
             if (__atomic_load_n(&v6_pending, __ATOMIC_ACQUIRE)) {
                 __atomic_store_n(&v6_pending, 0, __ATOMIC_RELAXED);
                 request_config6();
-            } else if (!v6_claimed && rs_sent < 5 && time(NULL) >= next_rs) {
+            } else if (v6_lost(now_s())) {
+                LOG("IPv6: le téléphone n'en fournit plus, retrait de la configuration");
+                request_deconfig6();
+                v6_claimed = 0; v6_expire = 0;
+                __atomic_store_n(&v6_withdraw, 0, __ATOMIC_RELAXED);
+                rs_sent = 0; next_rs = time(NULL) + 1;        /* on sollicite de nouveau : l'IPv6 peut revenir */
+            } else if (!v6_claimed && time(NULL) >= next_rs) {
                 uint8_t rs[14 + 40 + 16];                     /* on sollicite une RA (réponse quasi immédiate) */
                 VLOG("IPv6: sollicitation de routeur (%d)", rs_sent + 1);
                 send_frame(rs, build_rs(rs));
                 rs_sent++;
-                next_rs = time(NULL) + 3;
+                next_rs = time(NULL) + (rs_sent < 5 ? 3 : 30);   /* puis une fois par 30 s : le téléphone peut gagner l'IPv6 plus tard */
             }
         }
         if (!ep_int) { sleep(1); continue; }
@@ -917,7 +974,6 @@ static void usage(const char *p) {
 }
 
 /* ---------- Superviseur (root) ---------- */
-static int cfg4_done, cfg6_done;        /* configuration déjà appliquée pour le worker courant */
 static time_t last_adb_run;
 static int allow_overlap;               /* -O : accepte un sous-réseau qui recouvre un réseau existant */
 #define IPC_RATE_MAX 30                 /* un worker normal fait moins de dix demandes par session */
@@ -1016,6 +1072,10 @@ static void handle_request(int sock, const struct ipc_msg *rq) {
         cfg6_done = 1;
         break;
     }
+    case IPC_REQ_DECONFIG6:
+        if (!ipv6_on || utun_fd < 0 || !cfg6_done || rq->len != 0) { rp.status = 200; break; }
+        deconfigure_ipv6();
+        break;
     case IPC_REQ_STATUS: {
         int e = policy_check_status((const char *)rq->data, rq->len);
         if (e == POLICY_OK && !strncmp((const char *)rq->data, "connected ", 10)) {
@@ -1317,7 +1377,8 @@ static int session(void) {
     int rc = 1;
     running = 1; utun_fd = -1; my_ip = gw_ip = srv_ip = 0;
     dhcp_active = 0; memset(&dhcp_c, 0, sizeof dhcp_c);
-    v6_claimed = v6_pending = v6_routes = v6_svc = 0;
+    v6_claimed = v6_pending = v6_routes = v6_svc = v6_withdraw = 0;
+    v6_expire = 0;
     status_tick("connecting");
     if (libusb_claim_interface(h, ctrl_if) || libusb_claim_interface(h, data_if)) {
         LOG("Impossible de réserver les interfaces USB"); goto out;
