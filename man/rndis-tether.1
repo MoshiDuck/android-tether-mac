@@ -115,13 +115,15 @@ Usage error.
 .B 70
 The worker could not drop its privileges.
 .SH SECURITY
-Only the supervisor has root privileges. It accepts five kinds of requests from the worker and validates
+Only the supervisor has root privileges. It accepts six kinds of requests from the worker and validates
 the values of each of them before running
 .BR ifconfig (8),
 .BR route (8),
 .BR scutil (8)
 or
 .BR adb (1).
+The worker cannot write core files and is limited to 128 file descriptors. It reports to the supervisor every 10 seconds,
+and the supervisor replaces a worker that has been silent for 60 seconds.
 See
 .I SECURITY.md
 and

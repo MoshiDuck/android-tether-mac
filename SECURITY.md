@@ -7,7 +7,7 @@ TetherMac's background service parses data sent by a USB device (the phone) and 
 **Trust model.** The service is split in two processes:
 
 - the **supervisor** runs as root, is small, and never parses data from the phone or the network. It creates the `utun` interface, applies network configuration only after validating it (`src/policy.c`), and cleans up;
-- the **worker** does all the parsing (USB, RNDIS, DHCP, NDP, packets) as an unprivileged user (`nobody`) and can only ask the supervisor for five precise actions over a fixed-size channel (`src/ipc.h`).
+- the **worker** does all the parsing (USB, RNDIS, DHCP, NDP, packets) as an unprivileged user (`nobody`) and can only ask the supervisor for six precise actions over a fixed-size channel (`src/ipc.h`).
 
 The worker is treated as *untrusted*. The worker is not sandboxed yet (see the [roadmap](ROADMAP.md)).
 

@@ -5,7 +5,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Security
+- **Worker watchdog.** The worker sends a sign of life every 10 s, but only if its receive, send and control threads have all run since the last one. The supervisor kills a worker that has been silent for 60 s, cleans up the network configuration and starts a new worker, so a hung worker no longer leaves the Mac without network.
+- **Resource limits.** Neither process can write a core file (it would contain the traffic or the configuration), and the worker is limited to 128 file descriptors.
+
 ### Fixed
+- `ipc_recv` accepts a `NULL` descriptor pointer (a descriptor sent with the message is then closed instead of leaking).
 - **IPv6 lost during a session.** If the phone stopped providing IPv6 after the session had started (for example because its internet moved to Wi-Fi), the Mac kept the old address and routes: IPv6 traffic then waited for a timeout instead of failing fast, and the leak guard did not come back. The worker now follows the router lifetime and the withdrawal of the prefix announced by the phone; when the IPv6 is gone, the supervisor removes the address, the service and the routes and puts the leak guard back (new request `DECONFIG6`, validated like the others). Router solicitations continue every 30 s while there is no IPv6, so it is picked up again when it returns.
 - A router advertisement with a router lifetime of 0 (not a default router) is no longer used to configure IPv6.
 
