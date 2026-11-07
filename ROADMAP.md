@@ -29,12 +29,13 @@ Released as 0.2.0. Both items were validated on the Galaxy S24 Ultra; the remain
 
 ## 0.3.0 — Hardening, confinement and observability
 
-- ⬜ **`DHCPRELEASE` on shutdown** so the phone's address pool is not left with stale leases.
-- ⬜ **Subnet-overlap guard** — refuse a phone subnet that overlaps a network the Mac already uses (a malicious phone could otherwise shadow a LAN). Needs a clear error message, since a legitimate clash would block tethering.
+- ✅ **`DHCPRELEASE` on shutdown** so the phone's address pool is not left with stale leases.
+- ✅ **Subnet-overlap guard** — refuse a phone subnet that overlaps a network the Mac already uses (a malicious phone could otherwise shadow a LAN). Needs a clear error message, since a legitimate clash would block tethering.
 - ⬜ **Privilege-drop hardening** — also set resource limits (`RLIMIT_NPROC`, `RLIMIT_FSIZE`) and verify, at startup, that the worker really lost root in a self-test.
-- ⬜ **IPC rate limiting and watchdog** — a worker that floods the supervisor, or stops answering, is killed and replaced.
+- ✅ **IPC rate limiting** — a worker that sends more than 30 requests in 10 seconds is killed and replaced (a normal worker sends fewer than ten per session).
+- ⬜ **Worker watchdog** — also replace a worker that stops answering (it needs a heartbeat, since a connected worker is legitimately quiet).
 - ⬜ **Log hygiene** — `/var/log/rndis-tether.log` permissions and rotation (`newsyslog`); no addresses of other devices in logs.
-- ⬜ **`--version` and a man page.**
+- ✅ **`--version` and a man page.**
 - ⬜ **macOS sandbox profile for the worker** (Seatbelt, deny by default; allow only the USB IOKit classes, the IPC socket and read access to the flag file). The goal is that even a compromised worker cannot open files or sockets.
 - ⬜ **`rndis-tether --diagnose`** — a single command that prints a shareable report (USB descriptors, RNDIS handshake result, DHCP exchange, RA received, routes, DNS state), with no secrets. This is what turns a "doesn't work" issue into something fixable.
 - ⬜ **Sleep/wake handling** — detect a Mac wake, re-verify the lease and the USB link, recover cleanly.
@@ -72,6 +73,7 @@ Exit criteria: documented numbers; no regression gate in CI beyond a generous th
 ## 0.6.0 — Comfort
 
 - ⬜ **Failover mode** — leave the default route alone and let the tether become the primary service only when Wi-Fi goes down (rank the SystemConfiguration service instead of adding split routes). Today `-r` sends *everything* through the phone, which spends mobile data.
+- ⬜ **Wi-Fi and the tether at the same time.** Today it is either/or: one connection travels over one link, so two links do not add up for a single download. In order of realism: (1) the *failover* mode above keeps the tether as a backup; (2) *per-flow load balancing* with `pf` (`route-to`, sticky per connection) spreads several simultaneous connections over both links — it helps parallel downloads, not one big file, and some sites dislike a client that changes address; (3) real *bonding* of a single connection needs an aggregation server (MPTCP-style) and is out of scope for this project.
 - ⬜ **Menu bar**: phone model, IPv4/IPv6 addresses, traffic counters, notifications on connect/disconnect, "open at login", a mode switch (always / failover / off).
 - ⬜ **Settings file** (`/etc/rndis-tether.conf`) instead of arguments baked into a launchd plist.
 - ⬜ **Localisation** (English, French).

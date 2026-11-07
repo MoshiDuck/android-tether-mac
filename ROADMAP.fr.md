@@ -29,12 +29,13 @@ Publiée en 0.2.0. Les deux points ont été validés sur le Galaxy S24 Ultra ; 
 
 ## 0.3.0 — Durcissement, confinement et observabilité
 
-- ⬜ **`DHCPRELEASE` à l'arrêt**, pour ne pas laisser de baux orphelins dans le pool d'adresses du téléphone.
-- ⬜ **Garde contre le chevauchement de sous-réseau** — refuser un sous-réseau du téléphone qui recouvre un réseau déjà utilisé par le Mac (un téléphone malveillant pourrait sinon masquer un réseau local). Message d'erreur clair, car un conflit légitime bloquerait le tethering.
+- ✅ **`DHCPRELEASE` à l'arrêt**, pour ne pas laisser de baux orphelins dans le pool d'adresses du téléphone.
+- ✅ **Garde contre le chevauchement de sous-réseau** — refuser un sous-réseau du téléphone qui recouvre un réseau déjà utilisé par le Mac (un téléphone malveillant pourrait sinon masquer un réseau local). Message d'erreur clair, car un conflit légitime bloquerait le tethering.
 - ⬜ **Durcissement de l'abandon de privilèges** — limites de ressources (`RLIMIT_NPROC`, `RLIMIT_FSIZE`) et auto-test au démarrage prouvant que le worker a bien perdu root.
-- ⬜ **Limitation de débit de l'IPC et chien de garde** — un worker qui inonde le superviseur, ou qui ne répond plus, est tué et remplacé.
+- ✅ **Limitation de débit de l'IPC** — un worker qui envoie plus de 30 demandes en 10 secondes est tué et remplacé (un worker normal en fait moins de dix par session).
+- ⬜ **Chien de garde du worker** — remplacer aussi un worker qui ne répond plus (il faut un signal de vie, car un worker connecté est légitimement silencieux).
 - ⬜ **Hygiène des journaux** — droits et rotation de `/var/log/rndis-tether.log` (`newsyslog`) ; pas d'adresses d'autres appareils dans les logs.
-- ⬜ **`--version` et une page de manuel.**
+- ✅ **`--version` et une page de manuel.**
 - ⬜ **Profil de bac à sable macOS pour le worker** (Seatbelt, tout refusé par défaut ; seulement les classes IOKit USB, le socket IPC et la lecture du fichier d'état). Même un worker compromis ne pourrait plus ouvrir de fichiers ni de sockets.
 - ⬜ **`rndis-tether --diagnose`** — une commande qui produit un rapport partageable (descripteurs USB, résultat de la négociation RNDIS, échange DHCP, RA reçue, routes, état du DNS), sans secrets. C'est ce qui transforme un « ça ne marche pas » en problème réparable.
 - ⬜ **Gestion veille/réveil** — détecter le réveil du Mac, revérifier le bail et la liaison USB, reprendre proprement.
@@ -72,7 +73,7 @@ Critères de sortie : chiffres documentés ; pas d'autre garde-fou de régressio
 ## 0.6.0 — Confort
 
 - ⬜ **Mode secours (failover)** — laisser la route par défaut tranquille et ne faire du tethering le service principal que si le Wi-Fi tombe (classer le service SystemConfiguration au lieu d'ajouter des routes scindées). Aujourd'hui `-r` fait passer *tout* par le téléphone, ce qui consomme des données mobiles.
-- ⬜ **Barre de menus** : modèle du téléphone, adresses IPv4/IPv6, compteurs de trafic, notifications de connexion/déconnexion, « ouvrir à la connexion », choix du mode (toujours / secours / arrêt).
+- ⬜ **Wi-Fi et tethering en même temps.** Aujourd'hui c'est l'un ou l'autre : une connexion passe par un seul lien, donc deux liens ne s'additionnent pas pour un seul téléchargement. Du plus réaliste au plus ambitieux : (1) le mode *secours* ci-dessus garde le tethering en réserve ; (2) un *équilibrage par flux* avec `pf` (`route-to`, collant par connexion) répartit plusieurs connexions simultanées sur les deux liens — utile pour des téléchargements en parallèle, pas pour un gros fichier unique, et certains sites n'aiment pas qu'un client change d'adresse ; (3) un vrai *regroupement* d'une seule connexion exige un serveur d'agrégation (de type MPTCP) et sort du cadre de ce projet. adresses IPv4/IPv6, compteurs de trafic, notifications de connexion/déconnexion, « ouvrir à la connexion », choix du mode (toujours / secours / arrêt).
 - ⬜ **Fichier de réglages** (`/etc/rndis-tether.conf`) au lieu d'arguments figés dans un plist launchd.
 - ⬜ **Localisation** (anglais, français).
 - ⬜ **Alerte de consommation** — afficher l'état « données limitées » du téléphone et un plafond configurable.

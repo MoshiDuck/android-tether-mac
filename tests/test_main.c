@@ -516,6 +516,36 @@ static void test_handle_ipv6(void) {
     CHECK(1);
 }
 
+/* À la fin d'une session, le bail n'est rendu que s'il est encore valable ; jamais deux fois. */
+static void test_release_lease(void) {
+    memcpy(my_mac, TEST_MAC, 6);
+    struct lease L = {.ip = ip4(10, 217, 123, 144), .srv = ip4(10, 217, 123, 221), .secs = 3600};
+    memcpy(L.srvmac, (uint8_t[]){0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff}, 6);
+
+    memset(&dhcp_c, 0, sizeof dhcp_c);
+    dhcp_active = 0;
+    CHECK(release_lease() == 0);                                           /* pas de bail géré */
+
+    dhcp_client_bound(&dhcp_c, &L, 1000);
+    dhcp_active = 1;
+    dhcp_c.state = DHCP_EXPIRED;
+    CHECK(release_lease() == 0 && dhcp_active == 0);                       /* bail perdu : rien à rendre */
+
+    dhcp_client_bound(&dhcp_c, &L, 1000);
+    dhcp_active = 1;
+    CHECK(release_lease() == -1 && dhcp_active == 0);                      /* sans USB, l'envoi échoue proprement */
+    CHECK(release_lease() == 0);                                           /* et on ne recommence pas */
+
+    for (int st = DHCP_BOUND; st <= DHCP_REBINDING; st++) {                /* tous les états « valables » tentent l'envoi */
+        dhcp_client_bound(&dhcp_c, &L, 1000);
+        dhcp_c.state = (enum dhcp_state)st;
+        dhcp_active = 1;
+        CHECK(release_lease() == -1);
+    }
+    memset(&dhcp_c, 0, sizeof dhcp_c);
+    dhcp_active = 0;
+}
+
 /* Le client DHCP traite l'ACK d'un renouvellement reçu par rx_frame (sans relayer la trame). */
 static void test_renew_ack(void) {
     memcpy(my_mac, TEST_MAC, 6);
@@ -551,6 +581,7 @@ int main(void) {
     test_parse_ra();
     test_handle_ipv6();
     test_renew_ack();
+    test_release_lease();
     run_dhcp_tests();
     run_policy_tests();
     run_ipc_tests();

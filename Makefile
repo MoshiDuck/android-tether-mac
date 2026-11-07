@@ -1,6 +1,7 @@
 CC      ?= clang
+VERSION := $(shell cat VERSION)
 CFLAGS  ?= -O2 -Wall -Wextra
-override CFLAGS += $(shell pkg-config --cflags libusb-1.0)
+override CFLAGS += $(shell pkg-config --cflags libusb-1.0) -DRNDIS_VERSION='"$(VERSION)"'
 LDLIBS  += $(shell pkg-config --libs libusb-1.0) -lpthread
 
 SRC  = src/main.c src/dhcp.c src/policy.c src/ipc.c

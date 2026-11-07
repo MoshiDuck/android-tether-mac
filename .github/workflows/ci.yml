@@ -30,7 +30,9 @@ jobs:
         run: make strict
 
       - name: Build driver
-        run: make
+        run: |
+          make
+          ./rndis-tether --version
 
       - name: Unit, state-machine and fuzz tests (ASan + UBSan)
         run: make test
@@ -79,3 +81,6 @@ jobs:
 
       - name: Lint workflows
         run: actionlint
+
+      - name: Lint the man page
+        run: mandoc -Tlint -Wwarning man/rndis-tether.1

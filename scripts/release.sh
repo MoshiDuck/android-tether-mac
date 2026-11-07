@@ -25,6 +25,7 @@ if ! git diff --quiet || ! git diff --cached --quiet; then
     exit 1
 fi
 git rev-parse "v$VER" >/dev/null 2>&1 && { echo "Le tag v$VER existe déjà." >&2; exit 1; }
+[ "$(cat VERSION)" = "$VER" ] || { echo "Le fichier VERSION contient \"$(cat VERSION)\" : mets-le à \"$VER\", commite, puis relance." >&2; exit 1; }
 
 echo "==> Tag v$VER"
 git tag -a "v$VER" -m "v$VER"

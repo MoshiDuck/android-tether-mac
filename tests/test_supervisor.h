@@ -20,7 +20,26 @@ static int cmd_has(const char *needle) {
     return 0;
 }
 
+/* réseaux « connectés au Mac » simulés pour la garde contre le masquage de sous-réseau */
+static struct connected_net test_nets[8];
+static int test_nnets;
+
+int test_list_connected(struct connected_net *out, int max) {
+    int n = test_nnets < max ? test_nnets : max;
+    for (int k = 0; k < n; k++) out[k] = test_nets[k];
+    return n;
+}
+
+static void add_net(uint8_t a, uint8_t b, uint8_t c, uint8_t d, uint8_t ma, uint8_t mb, uint8_t mc, uint8_t md) {
+    uint8_t ip[4] = {a, b, c, d}, mk[4] = {ma, mb, mc, md};
+    memcpy(&test_nets[test_nnets].ip, ip, 4);
+    memcpy(&test_nets[test_nnets].mask, mk, 4);
+    test_nnets++;
+}
+
 static void sup_reset(void) {
+    test_nnets = 0;
+    allow_overlap = 0;
     ncmds = 0;
     if (utun_fd >= 0) close(utun_fd);
     utun_fd = -1;
@@ -96,6 +115,44 @@ static void test_sup_config4(void) {
     int before = ncmds;
     CHECK(sup_call(msg(IPC_REQ_CONFIG4, CFG4_OK, 16), &rp, &fd) == 1 && rp.status == 200);   /* une seule fois */
     CHECK(ncmds == before);
+}
+
+static void test_sup_overlap(void) {
+    struct ipc_msg rp;
+    int fd = -1;
+    uint8_t phone24[16] = {172, 22, 208, 144, 172, 22, 208, 221, 255, 255, 255, 0, 172, 22, 208, 221};   /* 172.22.208.0/24 */
+
+    sup_reset();                                                    /* Wi-Fi 172.22.209.216/20 : le sous-réseau du téléphone s'y trouve */
+    add_net(172, 22, 209, 216, 255, 255, 240, 0);
+    sup_utun();
+    CHECK(sup_call(msg(IPC_REQ_CONFIG4, phone24, 16), &rp, &fd) == 1 && rp.status == POLICY_OVERLAP);
+    CHECK(ncmds == 0 && !cfg4_done);                                /* aucune commande exécutée */
+
+    test_nnets = 0;                                                 /* le conflit disparaît : la même demande passe */
+    CHECK(sup_call(msg(IPC_REQ_CONFIG4, phone24, 16), &rp, &fd) == 1 && rp.status == 0 && cfg4_done);
+
+    sup_reset();                                                    /* sous-réseau distinct du Wi-Fi : accepté */
+    add_net(172, 22, 209, 216, 255, 255, 240, 0);
+    sup_utun();
+    CHECK(sup_call(msg(IPC_REQ_CONFIG4, CFG4_OK, 16), &rp, &fd) == 1 && rp.status == 0);
+
+    sup_reset();                                                    /* réseau d'entreprise en /8 : ne bloque pas */
+    add_net(10, 1, 2, 3, 255, 0, 0, 0);
+    sup_utun();
+    CHECK(sup_call(msg(IPC_REQ_CONFIG4, CFG4_OK, 16), &rp, &fd) == 1 && rp.status == 0);
+
+    sup_reset();                                                    /* adresse VPN en /32 : ne bloque pas */
+    add_net(10, 217, 123, 50, 255, 255, 255, 255);
+    sup_utun();
+    CHECK(sup_call(msg(IPC_REQ_CONFIG4, CFG4_OK, 16), &rp, &fd) == 1 && rp.status == 0);
+
+    sup_reset();                                                    /* -O : conflit accepté sciemment */
+    add_net(172, 22, 209, 216, 255, 255, 240, 0);
+    allow_overlap = 1;
+    sup_utun();
+    CHECK(sup_call(msg(IPC_REQ_CONFIG4, phone24, 16), &rp, &fd) == 1 && rp.status == 0);
+    allow_overlap = 0;
+    sup_reset();
 }
 
 static void test_sup_config6(void) {
@@ -287,8 +344,41 @@ static void test_drop_privileges(void) {
     CHECK(drop_privileges(65534, 65534) == -1);                      /* sans root, l'abandon échoue (et on le détecte) */
 }
 
+/* La vraie interrogation du système (getifaddrs) renvoie des réseaux cohérents : jamais d'adresse nulle, de boucle locale ou de masque invalide. */
+static void test_list_connected_system(void) {
+    struct connected_net nets[64];
+    int n = list_connected_system(nets, 64, NULL);
+    CHECK(n >= 0 && n <= 64);
+    for (int k = 0; k < n; k++) {
+        uint32_t ip = ntohl(nets[k].ip), m = ntohl(nets[k].mask);
+        CHECK(ip != 0 && (ip >> 24) != 127);
+        CHECK(m != 0 && (~m & (~m + 1)) == 0);                       /* masque contigu */
+    }
+    if (n > 0) {                                                      /* le filtrage par nom retire bien l'interface demandée */
+        struct ifaddrs *all, *p;
+        char name[IFNAMSIZ] = "";
+        if (getifaddrs(&all) == 0) {
+            for (p = all; p && !name[0]; p = p->ifa_next) {
+                if (p->ifa_addr && p->ifa_netmask && p->ifa_addr->sa_family == AF_INET && (p->ifa_flags & IFF_UP) &&
+                    !(p->ifa_flags & IFF_LOOPBACK))
+                    snprintf(name, sizeof name, "%s", p->ifa_name);
+            }
+            int cnt_name = 0;
+            for (p = all; p; p = p->ifa_next)
+                if (p->ifa_addr && p->ifa_netmask && p->ifa_addr->sa_family == AF_INET && (p->ifa_flags & IFF_UP) &&
+                    !(p->ifa_flags & IFF_LOOPBACK) && !strcmp(p->ifa_name, name))
+                    cnt_name++;
+            freeifaddrs(all);
+            CHECK(list_connected_system(nets, 64, name) == n - cnt_name);
+        }
+    }
+    CHECK(list_connected_system(nets, 0, NULL) == 0);                 /* tampon de taille nulle : rien n'est écrit */
+}
+
 static void run_supervisor_tests(void) {
+    test_list_connected_system();
     test_sup_config4();
+    test_sup_overlap();
     test_sup_config6();
     test_sup_status();
     test_sup_adb();

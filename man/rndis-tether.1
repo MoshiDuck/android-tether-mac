@@ -1,0 +1,126 @@
+.TH RNDIS-TETHER 1 "2026-11-06" "TetherMac" "General Commands Manual"
+.SH NAME
+rndis-tether \- USB tethering from Android phones on macOS
+.SH SYNOPSIS
+.B rndis-tether
+[\fB\-rwa4v\fR]
+[\fB\-U\fR \fIuser\fR]
+[\fB\-W\fR \fIuser\fR]
+[\fB\-d\fR \fIvid\fR:\fIpid\fR]
+.br
+.B rndis-tether
+\fB\-\-version\fR | \fB\-V\fR
+.SH DESCRIPTION
+.B rndis-tether
+gives the Mac internet access through an Android phone's USB tethering, without any kernel extension.
+It speaks RNDIS to the phone through libusb, handles DHCP, ARP and IPv6 neighbor discovery itself,
+and exposes the link as a
+.BR utun (4)
+interface.
+.PP
+It must run as root.
+It is normally installed as a LaunchDaemon by
+.B tethermac-install
+(or
+.BR install.sh ),
+with the options
+.BR "\-r \-w \-a" .
+.PP
+The program is split in two processes.
+A small
+.I supervisor
+runs as root: it creates the interface, applies network configuration after validating every value,
+and cleans up.
+A
+.I worker
+runs as an unprivileged user and does all the parsing of data coming from the phone and the network.
+.SH OPTIONS
+.TP
+.B \-r
+Send all traffic through the phone (split routes 0.0.0.0/1 and 128.0.0.0/1, and ::/1 and 8000::/1 for IPv6)
+and apply the phone's DNS server.
+Both are removed when the session ends.
+.TP
+.B \-w
+Wait for a phone and reconnect after it is unplugged.
+.TP
+.B \-a
+Enable USB tethering on the phone with
+.BR adb (1)
+when no RNDIS device is found. USB debugging must be enabled and authorised.
+.TP
+.B \-4
+IPv4 only: do not relay IPv6.
+.TP
+.B \-O
+Accept a phone subnet that overlaps a network already connected to the Mac.
+By default such a subnet is refused, so that a malicious phone cannot shadow a local network.
+.TP
+.BI \-U " user"
+User that runs
+.BR adb .
+Defaults to
+.IR SUDO_USER ;
+required when started by launchd.
+.TP
+.BI \-W " user"
+Unprivileged user of the worker process. Defaults to
+.IR nobody .
+.TP
+.BI \-d " vid:pid"
+Only use the device with this USB identifier (hexadecimal), for example
+.IR 04e8:6864 .
+.TP
+.B \-v
+Verbose logs.
+.TP
+.BR \-V ", " \-\-version
+Print the version and exit.
+.SH FILES
+.TP
+.I /var/log/rndis-tether.log
+Log of the service. Lines are tagged [root] or [worker].
+.TP
+.I /Users/Shared/rndis-tether.disabled
+If this file exists, the service stays idle. The menu bar app creates and removes it.
+.TP
+.I /Users/Shared/rndis-tether.status
+Current state, written by the supervisor every few seconds.
+.TP
+.I /Library/LaunchDaemons/io.github.rndis-tether.plist
+launchd job of the service.
+.SH EXIT STATUS
+.TP
+.B 0
+Normal end.
+.TP
+.B 1
+No RNDIS device found (without \fB\-w\fR), session failure, or startup failure.
+.TP
+.B 2
+Usage error.
+.TP
+.B 70
+The worker could not drop its privileges.
+.SH SECURITY
+Only the supervisor has root privileges. It accepts five kinds of requests from the worker and validates
+the values of each of them before running
+.BR ifconfig (8),
+.BR route (8),
+.BR scutil (8)
+or
+.BR adb (1).
+See
+.I SECURITY.md
+and
+.I docs/how-it-works.md
+in the source distribution.
+.SH SEE ALSO
+.BR adb (1),
+.BR ifconfig (8),
+.BR route (8),
+.BR scutil (8)
+.PP
+https://github.com/MoshiDuck/android-tether-mac
+.SH LICENSE
+GNU General Public License version 3 or later.

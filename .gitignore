@@ -3,3 +3,7 @@ tests/test_main
 tests/test_main.dSYM/
 menubar/build/
 .DS_Store
+tests/test_cov
+tests/test_cov.dSYM/
+tests/cov.profraw
+tests/cov.profdata

@@ -75,6 +75,8 @@ sudo ./rndis-tether -v -r -w -a
 | `-a` | Enable tethering on the phone through `adb` (needs USB debugging) |
 | `-4` | IPv4 only (turn the IPv6 relay off) |
 | `-W user` | Unprivileged user for the worker process (default `nobody`) |
+| `-O` | Accept a phone subnet that overlaps a network already in use (refused by default) |
+| `-V`, `--version` | Print the version |
 | `-U user` | User to run `adb` as (default `$SUDO_USER`; set by the LaunchDaemon) |
 | `-d vid:pid` | Target a specific device (hex) |
 | `-v` | Verbose logs |

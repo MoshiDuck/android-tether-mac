@@ -37,6 +37,8 @@ mkdir -p /usr/local/bin
 install -m 755 "$HERE/rndis-tether" "$BIN"
 rm -rf "$APP"
 cp -R "$HERE/menubar/build/RNDISTether.app" "$APP"
+mkdir -p /usr/local/share/man/man1
+install -m 644 "$HERE/man/rndis-tether.1" /usr/local/share/man/man1/rndis-tether.1
 
 cat > "$DAEMON_PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>

@@ -21,6 +21,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <ifaddrs.h>
 #include <libusb.h>
 #include <net/if.h>
 #include <net/if_utun.h>
@@ -46,6 +47,10 @@
 #include "dhcp.h"
 #include "ipc.h"
 #include "policy.h"
+
+#ifndef RNDIS_VERSION
+#define RNDIS_VERSION "unknown"
+#endif
 
 /* ---------- RNDIS ---------- */
 #define RNDIS_PACKET_MSG        0x00000001u
@@ -843,6 +848,24 @@ static int find_device(uint16_t vid, uint16_t pid) {
 
 static int session(void);
 
+/* Fin d'une session normale : rend le bail au serveur (RFC 2131 §3.1.7) pour ne pas laisser une adresse
+ * orpheline dans son pool. Retourne 0 s'il n'y avait rien à rendre, 1 si c'est fait, -1 si l'envoi a échoué
+ * (par exemple parce que le téléphone a été débranché). */
+static int release_lease(void) {
+    struct dhcp_client c;
+    int active;
+    pthread_mutex_lock(&dhcp_lock);
+    c = dhcp_c;
+    active = dhcp_active;
+    dhcp_active = 0;                                        /* plus aucun renouvellement après le rendu */
+    pthread_mutex_unlock(&dhcp_lock);
+    if (!active || c.state == DHCP_EXPIRED || !c.ip || !c.srv) return 0;
+    uint8_t f[700];
+    if (send_frame(f, dhcp_build_release(f, my_mac, arc4random() | 1, c.ip, c.srvmac, c.srv)) != 0) return -1;
+    LOG("DHCP: bail rendu au serveur");
+    return 1;
+}
+
 /* Bascule le téléphone en RNDIS via adb, exécuté en tant qu'utilisateur appelant sudo
  * (ses clés ADB et son PATH, pas ceux de root). */
 static void adb_enable(void) {
@@ -854,7 +877,8 @@ static void adb_enable(void) {
 }
 
 static void usage(const char *p) {
-    fprintf(stderr, "Usage: sudo %s [-r] [-v] [-d vid:pid]\n"
+    fprintf(stderr, "Usage: sudo %s [-r] [-w] [-a] [-4] [-U user] [-W user] [-v] [-d vid:pid]\n"
+                    "       %s --version\n"
                     "  -r  route tout le trafic via le téléphone (routes 0/1 et 128/1, retirées à la sortie)\n"
                     "      (applique aussi le DNS du téléphone, retiré à la sortie)\n"
                     "  -w  attendre le téléphone et se reconnecter après un débranchement\n"
@@ -862,13 +886,68 @@ static void usage(const char *p) {
                     "  -U  utilisateur pour adb (défaut: SUDO_USER ; requis en LaunchDaemon)\n"
                     "  -W  utilisateur sans privilèges du worker (défaut: nobody)\n"
                     "  -4  IPv4 uniquement (désactive le relais IPv6)\n"
+                    "  -O  accepter un sous-réseau du téléphone qui recouvre un réseau déjà utilisé\n"
                     "  -v  logs détaillés\n"
-                    "  -d  cibler un appareil précis (hex), ex: 18d1:4ee3\n", p);
+                    "  -d  cibler un appareil précis (hex), ex: 18d1:4ee3\n"
+                    "  -V  afficher la version\n", p, p);
 }
 
 /* ---------- Superviseur (root) ---------- */
 static int cfg4_done, cfg6_done;        /* configuration déjà appliquée pour le worker courant */
 static time_t last_adb_run;
+static int allow_overlap;               /* -O : accepte un sous-réseau qui recouvre un réseau existant */
+#define IPC_RATE_MAX 30                 /* un worker normal fait moins de dix demandes par session */
+#define IPC_RATE_WINDOW 10              /* secondes */
+
+/* Réseaux IPv4 actuellement connectés au Mac (hors boucle locale et hors notre interface utun). */
+struct connected_net { uint32_t ip, mask; };
+
+#ifdef RNDIS_TESTING
+int test_list_connected(struct connected_net *out, int max);   /* fourni par les tests */
+#endif
+
+/* Interroge le système : réseaux IPv4 des interfaces actives, hors boucle locale et hors `skip_name`. */
+static int list_connected_system(struct connected_net *out, int max, const char *skip_name) {
+    struct ifaddrs *all, *p;
+    int n = 0;
+    if (getifaddrs(&all) < 0) return 0;
+    for (p = all; p && n < max; p = p->ifa_next) {
+        if (!p->ifa_addr || !p->ifa_netmask || p->ifa_addr->sa_family != AF_INET) continue;
+        if (!(p->ifa_flags & IFF_UP) || (p->ifa_flags & IFF_LOOPBACK)) continue;
+        if (skip_name && skip_name[0] && !strcmp(p->ifa_name, skip_name)) continue;
+        out[n].ip = ((struct sockaddr_in *)(void *)p->ifa_addr)->sin_addr.s_addr;
+        out[n].mask = ((struct sockaddr_in *)(void *)p->ifa_netmask)->sin_addr.s_addr;
+        n++;
+    }
+    freeifaddrs(all);
+    return n;
+}
+
+static int list_connected(struct connected_net *out, int max) {
+#ifdef RNDIS_TESTING
+    return test_list_connected(out, max);                  /* les tests simulent la liste ; list_connected_system est testée à part */
+#else
+    return list_connected_system(out, max, utun_name);
+#endif
+}
+
+/* Retourne un code POLICY_* non nul si le sous-réseau du téléphone masquerait un réseau déjà utilisé. */
+static int check_not_shadowing(uint32_t ip, uint32_t mask) {
+    struct connected_net nets[64];
+    int n = list_connected(nets, 64);
+    for (int k = 0; k < n; k++) {
+        if (policy_check_overlap(ip, mask, nets[k].ip, nets[k].mask) == POLICY_OK) continue;
+        char a[INET_ADDRSTRLEN], b[INET_ADDRSTRLEN];
+        uint32_t net = ip & mask, onet = nets[k].ip & nets[k].mask;
+        inet_ntop(AF_INET, &net, a, sizeof a);
+        inet_ntop(AF_INET, &onet, b, sizeof b);
+        LOG("Configuration IPv4 refusée : le sous-réseau %s/%d du téléphone recouvre un réseau déjà utilisé par ce Mac (%s/%d). "
+            "Changer le sous-réseau du téléphone, ou lancer avec -O pour l'accepter.",
+            a, __builtin_popcount(ntohl(mask)), b, __builtin_popcount(ntohl(nets[k].mask)));
+        return POLICY_OVERLAP;
+    }
+    return POLICY_OK;
+}
 
 /* Traite une demande du worker. Il ne peut demander que des actions précises, et chaque valeur
  * est validée par policy.c : un worker compromis ne peut pas faire exécuter autre chose. */
@@ -893,6 +972,7 @@ static void handle_request(int sock, const struct ipc_msg *rq) {
         memcpy(&mask, rq->data + 8, 4); memcpy(&dns, rq->data + 12, 4);
         int e = policy_check_v4(ip, gw, mask, dns);
         if (e) { LOG("Configuration IPv4 refusée : %s", policy_strerror(e)); rp.status = (uint8_t)e; break; }
+        if (!allow_overlap && (e = check_not_shadowing(ip, mask)) != POLICY_OK) { rp.status = (uint8_t)e; break; }
         memset(&L, 0, sizeof L);
         L.ip = ip; L.gw = gw; L.mask = mask; L.dns = dns;
         my_ip = ip; gw_ip = gw;
@@ -1004,6 +1084,7 @@ static int run_worker_once(unsigned vid, unsigned pid, uid_t uid, gid_t gid) {
     close(sv[1]);
     utun_fd = -1; cfg4_done = cfg6_done = 0; my_ip = gw_ip = 0;
     v6_routes = v6_svc = 0;
+    struct rate_limit rl = {0, 0};
 
     for (;;) {
         struct ipc_msg m;
@@ -1011,6 +1092,11 @@ static int run_worker_once(unsigned vid, unsigned pid, uid_t uid, gid_t gid) {
         int r = ipc_recv(sv[0], &m, &fd, 1000);
         if (r == 1) {
             if (fd >= 0) close(fd);                                  /* un worker n'a aucune raison de nous passer un descripteur */
+            if (!rate_allow(&rl, now_s(), IPC_RATE_MAX, IPC_RATE_WINDOW)) {
+                LOG("Le worker envoie trop de demandes (plus de %d en %d s) : arrêt du worker", IPC_RATE_MAX, IPC_RATE_WINDOW);
+                kill(child, SIGKILL);
+                break;
+            }
             handle_request(sv[0], &m);
         } else if (r < 0) {
             break;                                                   /* worker disparu ou message invalide */
@@ -1041,7 +1127,7 @@ static int supervisor_main(unsigned vid, unsigned pid) {
     }
     uid_t uid = pw->pw_uid;
     gid_t gid = pw->pw_gid;
-    LOG("Superviseur démarré ; le worker tournera sans privilèges (utilisateur %s)", worker_user);
+    LOG("Superviseur %s démarré ; le worker tournera sans privilèges (utilisateur %s)", RNDIS_VERSION, worker_user);
     int rc = 0;
     while (!quit) {
         if (is_disabled()) { status_tick("disabled"); sleep(1); continue; }
@@ -1061,8 +1147,11 @@ static int supervisor_main(unsigned vid, unsigned pid) {
 int main(int argc, char **argv) {
     unsigned vid = 0, pid = 0;
     int opt;
-    while ((opt = getopt(argc, argv, "rwavd:U:W:4h")) != -1) {
+    if (argc > 1 && !strcmp(argv[1], "--version")) { printf("rndis-tether %s\n", RNDIS_VERSION); return 0; }
+    while ((opt = getopt(argc, argv, "rwavd:U:W:4OVh")) != -1) {
         switch (opt) {
+        case 'O': allow_overlap = 1; break;
+        case 'V': printf("rndis-tether %s\n", RNDIS_VERSION); return 0;
         case '4': ipv6_on = 0; break;
         case 'U': adb_user = optarg; break;
         case 'W': worker_user = optarg; break;
@@ -1123,6 +1212,7 @@ static int session(void) {
     }
     LOG("Arrêt…");
     pthread_join(t_rx, NULL); pthread_join(t_tx, NULL); pthread_join(t_ct, NULL);
+    release_lease();
     rc = 0;
 out:
     if (utun_fd >= 0) close(utun_fd);
