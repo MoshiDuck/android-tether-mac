@@ -647,6 +647,67 @@ static void test_worker_mtu_requests(void) {
     cur_mtu = MTU; v6_mtu = 0;
 }
 
+static void ra_at(const uint8_t *f, int n, int64_t now);
+
+/* Le routeur change de préfixe : l'ancien n'est plus annoncé, un autre l'est. */
+static void test_ra_prefix_change(void) {
+    uint8_t f[300], opts[96];
+    struct ra r;
+    put_prefix_opt(opts, 64, 0xC0, 3600);
+    put_prefix_opt(opts + 32, 64, 0xC0, 3600); opts[32 + 16] = 0x20; opts[32 + 17] = 0x01;
+    put_prefix_opt(opts + 64, 64, 0xC0, 3600); opts[64 + 16] = 0x24;
+    int n = make_ra(f, opts, 96);
+    CHECK(parse_ra(f, n, &r) == 0 && r.nprefixes == 3 && r.have_prefix && r.prefix[0] == 0x26);
+    CHECK(r.prefixes[0][0] == 0x26 && r.prefixes[1][0] == 0x20 && r.prefixes[2][0] == 0x24);
+    uint8_t five[200];
+    for (int k = 0; k < 5; k++) { put_prefix_opt(five + 32 * k, 64, 0xC0, 3600); five[32 * k + 16] = (uint8_t)(0x20 + k); }
+    n = make_ra(f, five, 160);
+    CHECK(parse_ra(f, n, &r) == 0 && r.nprefixes == 4);                      /* plafonné à 4, jamais de débordement */
+    put_prefix_opt(opts, 64, 0xC0, 0);                                       /* un préfixe retiré n'est pas « annoncé » */
+    n = make_ra(f, opts, 32);
+    CHECK(parse_ra(f, n, &r) == 0 && r.nprefixes == 0);
+
+    /* session établie avec 2600:383:a44:4d02::/64 */
+    v6_claimed = v6_pending = v6_withdraw = 0; v6_expire = 0;
+    put_prefix_opt(opts, 64, 0xC0, 3600);
+    n = make_ra(f, opts, 32);
+    CHECK(parse_ra(f, n, &r) == 0);
+    ra_apply(&r, 1000);
+    CHECK(v6_claimed);
+    v6_pending = 0;
+
+    ra_at(f, n, 1100);                                                       /* le même préfixe : rien */
+    CHECK(!v6_withdraw && v6_expire == 1100 + 1800);
+
+    put_prefix_opt(opts, 64, 0xC0, 3600); opts[16] = 0x20; opts[17] = 0x01;  /* seulement un autre préfixe : changement */
+    n = make_ra(f, opts, 32);
+    ra_at(f, n, 1200);
+    CHECK(v6_withdraw == 1);
+    v6_withdraw = 0;
+
+    put_prefix_opt(opts, 64, 0xC0, 3600);                                    /* le nôtre est parmi plusieurs, même en deuxième : rien */
+    put_prefix_opt(opts + 32, 64, 0xC0, 3600); opts[32 + 16] = 0x20;
+    n = make_ra(f, opts + 32, 32);                                           /* d'abord seulement l'autre... */
+    uint8_t both[64];
+    memcpy(both, opts + 32, 32); memcpy(both + 32, opts, 32);                /* ...puis l'autre en premier et le nôtre ensuite */
+    n = make_ra(f, both, 64);
+    ra_at(f, n, 1300);
+    CHECK(v6_withdraw == 0);
+
+    uint8_t other[300];                                                      /* un autre routeur change de préfixe : ne nous concerne pas */
+    put_prefix_opt(opts, 64, 0xC0, 3600); opts[16] = 0x20; opts[17] = 0x01;
+    n = make_ra(other, opts, 32);
+    other[14 + 8 + 15] ^= 0xff;
+    ra_at(other, n, 1400);
+    CHECK(v6_withdraw == 0);
+
+    put_prefix_opt(opts, 64, 0xC0, 3600); opts[16] = 0x20;                   /* RA sans aucun préfixe (simple keepalive) : rien */
+    n = make_ra(f, opts, 0);
+    ra_at(f, n, 1500);
+    CHECK(v6_withdraw == 0 && v6_expire == 1500 + 1800);
+    v6_claimed = v6_pending = v6_withdraw = 0; v6_expire = 0;
+}
+
 /* Cycle de vie de l'IPv6 obtenu : prise en compte, prolongation, retrait annoncé, expiration. */
 static void set_router_lifetime(uint8_t *f, uint16_t secs) { putbe16(f + 14 + 40 + 6, secs); }
 
@@ -783,6 +844,7 @@ int main(void) {
     test_handle_ipv6();
     test_ra_lifecycle();
     test_ra_mtu();
+    test_ra_prefix_change();
     test_lease_mtu();
     test_worker_mtu_requests();
     test_renew_ack();
