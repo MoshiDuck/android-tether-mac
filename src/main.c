@@ -45,6 +45,7 @@
 
 #include "bytes.h"
 #include "dhcp.h"
+#include "diagnose.h"
 #include "ipc.h"
 #include "policy.h"
 
@@ -900,6 +901,7 @@ static void adb_enable(void) {
 static void usage(const char *p) {
     fprintf(stderr, "Usage: sudo %s [-r] [-w] [-a] [-4] [-U user] [-W user] [-v] [-d vid:pid]\n"
                     "       %s --version\n"
+                    "       %s --diagnose   rapport à coller dans un ticket (sans sudo)\n"
                     "  -r  route tout le trafic via le téléphone (routes 0/1 et 128/1, retirées à la sortie)\n"
                     "      (applique aussi le DNS du téléphone, retiré à la sortie)\n"
                     "  -w  attendre le téléphone et se reconnecter après un débranchement\n"
@@ -911,7 +913,7 @@ static void usage(const char *p) {
                     "  -L  avec -r, laisser l'IPv6 sortir par les autres réseaux quand le tethering n'en a pas\n"
                     "  -v  logs détaillés\n"
                     "  -d  cibler un appareil précis (hex), ex: 18d1:4ee3\n"
-                    "  -V  afficher la version\n", p, p);
+                    "  -V  afficher la version\n", p, p, p);
 }
 
 /* ---------- Superviseur (root) ---------- */
@@ -1172,10 +1174,124 @@ static int supervisor_main(unsigned vid, unsigned pid) {
     return rc;
 }
 
+/* ---------- rndis-tether --diagnose ----------
+ * Rapport à coller dans un ticket. Sans privilèges, en lecture seule : il ne modifie rien. Toutes les
+ * commandes sont des chaînes fixes (aucune entrée utilisateur) et chaque ligne passe par diag_redact(). */
+static int diag_exec(FILE *out, const char *cmd, void (*peek)(const char *, struct diag_facts *), struct diag_facts *f) {
+    FILE *p = popen(cmd, "r");
+    char raw[512], red[1100];
+    int n = 0;
+    if (!p) { fprintf(out, "  (commande impossible)\n"); return 0; }
+    while (fgets(raw, sizeof raw, p)) {
+        raw[strcspn(raw, "\n")] = '\0';
+        if (peek) peek(raw, f);
+        diag_redact(raw, red, sizeof red);
+        fprintf(out, "  %s\n", red);
+        n++;
+    }
+    pclose(p);
+    if (!n) fprintf(out, "  (aucune sortie)\n");
+    return n;
+}
+
+static void diag_peek_ps(const char *line, struct diag_facts *f) {
+    while (*line == ' ') line++;
+    if (!strncmp(line, "root ", 5)) f->supervisor_running = 1;
+    else f->worker_running = 1;                        /* le worker tourne sous un autre utilisateur (nobody) */
+}
+static void diag_peek_route4(const char *line, struct diag_facts *f) { if (strstr(line, "utun")) f->tether_route = 1; }
+static void diag_peek_route6(const char *line, struct diag_facts *f) { if (strstr(line, "lo0")) f->v6_reject = 1; }
+
+static void diag_usb(FILE *out, struct diag_facts *f) {
+    libusb_device **list;
+    ssize_t cnt;
+    int shown = 0;
+    if (libusb_init(&ctx)) { fprintf(out, "  (libusb indisponible)\n"); return; }
+    cnt = libusb_get_device_list(ctx, &list);
+    for (ssize_t i = 0; i < cnt; i++) {
+        struct libusb_device_descriptor dd;
+        struct libusb_config_descriptor *cfg;
+        int seen[5] = {0};
+        if (libusb_get_device_descriptor(list[i], &dd) || libusb_get_active_config_descriptor(list[i], &cfg)) continue;
+        for (int k = 0; k < cfg->bNumInterfaces; k++) {
+            const struct libusb_interface_descriptor *a = &cfg->interface[k].altsetting[0];
+            seen[diag_iface_kind(a->bInterfaceClass, a->bInterfaceSubClass, a->bInterfaceProtocol)] = 1;
+        }
+        libusb_free_config_descriptor(cfg);
+        if (!(seen[DIAG_IF_RNDIS] || seen[DIAG_IF_NATIVE_NET] || seen[DIAG_IF_ADB] || seen[DIAG_IF_MTP])) continue;
+        fprintf(out, "  %04x:%04x", dd.idVendor, dd.idProduct);
+        for (int k = 1; k < 5; k++) if (seen[k]) fprintf(out, "  %s", diag_iface_name((enum diag_iface)k));
+        fprintf(out, "\n");
+        f->usb_rndis |= seen[DIAG_IF_RNDIS]; f->usb_native |= seen[DIAG_IF_NATIVE_NET];
+        f->usb_adb |= seen[DIAG_IF_ADB]; f->usb_mtp |= seen[DIAG_IF_MTP];
+        shown++;
+    }
+    libusb_free_device_list(list, 1);
+    libusb_exit(ctx);
+    ctx = NULL;
+    if (!shown) fprintf(out, "  (aucun appareil avec une interface réseau, ADB ou MTP)\n");
+}
+
+static int diagnose_main(void) {
+    struct diag_facts f;
+    char *body = NULL, verdict[1500], status[160] = "";
+    size_t blen = 0;
+    FILE *out = open_memstream(&body, &blen);
+    memset(&f, 0, sizeof f);
+    if (!out) { fprintf(stderr, "mémoire insuffisante\n"); return 1; }
+
+    fprintf(out, "\n== Système ==\n");
+    fprintf(out, "  rndis-tether %s\n", RNDIS_VERSION);
+    diag_exec(out, "/usr/bin/sw_vers -productVersion 2>&1; /usr/bin/uname -m 2>&1", NULL, NULL);
+
+    fprintf(out, "\n== Service ==\n");
+    diag_exec(out, "/bin/ps -axo user=,etime=,command= | /usr/bin/grep '[r]ndis-tether' | /usr/bin/grep -v -e '--diagnose' | /usr/bin/cut -c1-120",
+              diag_peek_ps, &f);
+    FILE *sf = fopen(STATUS_FILE, "r");
+    if (sf) {
+        if (fgets(status, sizeof status, sf)) status[strcspn(status, "\n")] = '\0';
+        fclose(sf);
+        f.status_known = 1;
+        char red[200];
+        diag_redact(status, red, sizeof red);
+        fprintf(out, "  état : %s\n", red);
+    } else fprintf(out, "  état : fichier absent\n");
+    f.state = diag_state_parse(status);
+    f.disabled_flag = is_disabled();
+    if (f.disabled_flag) fprintf(out, "  désactivé depuis l'icône de menu\n");
+
+    fprintf(out, "\n== USB (appareils avec interface réseau, ADB ou MTP) ==\n");
+    diag_usb(out, &f);
+
+    fprintf(out, "\n== ADB (état des appareils, sans numéro de série) ==\n");
+    diag_exec(out, "/bin/zsh -lc 'command -v adb >/dev/null 2>&1 || { echo \"adb introuvable\"; exit 0; }; "
+                   "adb devices 2>/dev/null | /usr/bin/awk \"NR > 1 && NF { print \\$2 }\"' 2>&1 | /usr/bin/head -n 8", NULL, NULL);
+
+    fprintf(out, "\n== Routes IPv4 du tethering (0/1 et 128.0/1) ==\n");
+    diag_exec(out, "/usr/sbin/netstat -rn -f inet 2>&1 | /usr/bin/grep -E '^(0/1|128\\.0/1)[[:space:]]'", diag_peek_route4, &f);
+    fprintf(out, "\n== Routes IPv6 (::/1 et 8000::/1) ==\n");
+    diag_exec(out, "/usr/sbin/netstat -rn -f inet6 2>&1 | /usr/bin/grep -E '^(::/1|8000::/1)[[:space:]]'", diag_peek_route6, &f);
+
+    fprintf(out, "\n== DNS (premier résolveur) ==\n");
+    diag_exec(out, "/usr/sbin/scutil --dns 2>&1 | /usr/bin/sed -n '1,14p'", NULL, NULL);
+
+    fprintf(out, "\n== Journal (40 dernières lignes) ==\n");
+    diag_exec(out, "/usr/bin/tail -n 40 /var/log/rndis-tether.log 2>&1", NULL, NULL);
+    fclose(out);
+
+    diag_verdict(&f, verdict, sizeof verdict);
+    printf("rndis-tether --diagnose : rapport sans mot de passe, sans adresse MAC complète, sans IPv4 publique\n"
+           "ni IPv6 globale, sans numéro de série. Relis-le avant de le publier.\n\n== Diagnostic ==\n%s", verdict);
+    fputs(body, stdout);
+    free(body);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     unsigned vid = 0, pid = 0;
     int opt;
     if (argc > 1 && !strcmp(argv[1], "--version")) { printf("rndis-tether %s\n", RNDIS_VERSION); return 0; }
+    if (argc > 1 && !strcmp(argv[1], "--diagnose")) return diagnose_main();
     while ((opt = getopt(argc, argv, "rwavd:U:W:4OLVh")) != -1) {
         switch (opt) {
         case 'L': allow_v6_leak = 1; break;

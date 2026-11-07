@@ -45,10 +45,16 @@ body:
     validations:
       required: true
   - type: textarea
+    id: diagnose
+    attributes:
+      label: Diagnostic report
+      description: "Output of `rndis-tether --diagnose` (no sudo needed). MAC addresses, public IP addresses and serial numbers are masked, but read it before posting."
+      render: shell
+  - type: textarea
     id: logs
     attributes:
-      label: Logs
-      description: "Output of `sudo ./rndis-tether -v -r -a` or the end of `/var/log/rndis-tether.log`."
+      label: More logs (optional)
+      description: "Output of `sudo ./rndis-tether -v -r -a`, if the report above is not enough."
       render: shell
   - type: textarea
     id: steps

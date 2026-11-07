@@ -44,7 +44,7 @@ Released as 0.3.0. Validated on the Galaxy S24 Ultra: `DHCPRELEASE` at the end o
 - ⬜ **Worker watchdog** — also replace a worker that stops answering (it needs a heartbeat, since a connected worker is legitimately quiet).
 - ⬜ **Log hygiene** — `/var/log/rndis-tether.log` permissions and rotation (`newsyslog`); no addresses of other devices in logs.
 - ⬜ **macOS sandbox profile for the worker** (Seatbelt, deny by default; allow only the USB IOKit classes, the IPC socket and read access to the flag file). The goal is that even a compromised worker cannot open files or sockets.
-- ⬜ **`rndis-tether --diagnose`** — a single command that prints a shareable report (USB descriptors, RNDIS handshake result, DHCP exchange, RA received, routes, DNS state), with no secrets. This is what turns a "doesn't work" issue into something fixable.
+- ✅ **`rndis-tether --diagnose`** — a single command, with no `sudo`, that prints a shareable report: service state (supervisor and worker), USB interfaces, ADB state, routes, DNS, the end of the log, and a plain-language diagnosis. MAC addresses, public IPs and serial numbers are masked. Still to add: the RNDIS handshake and DHCP exchange of the last session.
 - ⬜ **Sleep/wake handling** — detect a Mac wake, re-verify the lease and the USB link, recover cleanly.
 - ⬜ **IPv6 completeness** — track RA lifetimes and prefix changes (today only the first RA is used), RDNSS DNS servers, the RA MTU option, optional temporary addresses.
 - ⬜ **MTU and TCP MSS** — honour the path MTU, optional MSS clamping for networks that drop fragments.
