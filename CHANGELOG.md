@@ -5,6 +5,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-06
+
+**Security release — users of 0.1.0 should upgrade** (`brew upgrade android-tether-mac && tethermac-install`).
+
 ### Added
 - IPv6 support: router solicitation/advertisement with SLAAC address, neighbor advertisement replies, IPv6 packet relay in both directions, `::/1` + `8000::/1` routes with `-r`, and an IPv6 entry in the SystemConfiguration service so macOS asks for AAAA records. Validated on a Galaxy S24 Ultra; `-4` turns it off.
 - The DHCP lease renewal is now logged ("demande de renouvellement" / "bail renouvelé") so it can be observed.
@@ -29,5 +33,6 @@ First public release.
 - Homebrew tap (`brew install MoshiDuck/tap/android-tether-mac`).
 - Tested on a Samsung Galaxy S24 Ultra (SM-S928B, Android 16, One UI 8).
 
-[Unreleased]: https://github.com/MoshiDuck/android-tether-mac/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/MoshiDuck/android-tether-mac/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/MoshiDuck/android-tether-mac/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/MoshiDuck/android-tether-mac/releases/tag/v0.1.0
