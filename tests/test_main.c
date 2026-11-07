@@ -828,6 +828,8 @@ static void test_renew_ack(void) {
     dhcp_active = 0;
 }
 
+#include "test_session.h"
+
 int main(void) {
     test_byte_helpers();
     test_ip_csum();
@@ -856,6 +858,7 @@ int main(void) {
     run_logsan_tests();
     run_adb_tests();
     run_supervisor_tests();
+    run_session_tests();
     printf("%d vérifications, %d échec(s)\n", checks, failures);
     return failures ? 1 : 0;
 }

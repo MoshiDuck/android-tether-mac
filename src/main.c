@@ -123,6 +123,20 @@ static pthread_mutex_t tx_lock = PTHREAD_MUTEX_INITIALIZER;
 /* Compilé avec -DRNDIS_TESTING (tests uniquement) : les commandes système sont enregistrées, pas exécutées. */
 void test_record_command(const char *cmd);
 static int (*test_worker_entry)(int sock);   /* si défini, le worker forké exécute cette fonction au lieu de worker_main */
+
+/* Téléphone simulé : quand test_fake_usb est vrai, les échanges USB vont aux fonctions fake_usb_* des tests au lieu de
+ * libusb, et l'interface utun est une paire de sockets dont l'autre bout (test_utun_peer) reste aux tests. */
+static int test_fake_usb;
+static int test_utun_peer = -1;
+int fake_usb_control(libusb_device_handle *hd, uint8_t type, uint8_t req, uint16_t val, uint16_t idx, unsigned char *buf, uint16_t len, unsigned to);
+int fake_usb_bulk(libusb_device_handle *hd, unsigned char ep, unsigned char *buf, int len, int *got, unsigned to);
+int fake_usb_interrupt(libusb_device_handle *hd, unsigned char ep, unsigned char *buf, int len, int *got, unsigned to);
+#define libusb_control_transfer(...) (test_fake_usb ? fake_usb_control(__VA_ARGS__) : libusb_control_transfer(__VA_ARGS__))
+#define libusb_bulk_transfer(...) (test_fake_usb ? fake_usb_bulk(__VA_ARGS__) : libusb_bulk_transfer(__VA_ARGS__))
+#define libusb_interrupt_transfer(...) (test_fake_usb ? fake_usb_interrupt(__VA_ARGS__) : libusb_interrupt_transfer(__VA_ARGS__))
+#define libusb_claim_interface(hd, i) (test_fake_usb ? 0 : libusb_claim_interface(hd, i))
+#define libusb_release_interface(hd, i) (test_fake_usb ? 0 : libusb_release_interface(hd, i))
+#define libusb_close(hd) do { if (!test_fake_usb) libusb_close(hd); } while (0)
 #endif
 
 PRINTF_LIKE(1, 2) static void logf_(const char *fmt, ...) {
@@ -484,7 +498,11 @@ static int dhcp_acquire(struct lease *out) {
 static int utun_open(void) {
 #ifdef RNDIS_TESTING
     snprintf(utun_name, sizeof utun_name, "utun99");
-    return open("/dev/null", O_RDWR);
+    int sp[2];
+    if (socketpair(AF_UNIX, SOCK_DGRAM, 0, sp) < 0) return -1;   /* un paquet par lecture, comme utun */
+    if (test_utun_peer >= 0) close(test_utun_peer);
+    test_utun_peer = sp[1];
+    return sp[0];
 #endif
     int fd = socket(PF_SYSTEM, SOCK_DGRAM, SYSPROTO_CONTROL);
     if (fd < 0) { perror("socket(utun)"); return -1; }
