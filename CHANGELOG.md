@@ -6,6 +6,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 ## [Unreleased]
 
 ### Security
+- **The worker no longer writes to the log file.** Its output goes through a pipe and the supervisor copies it after removing control characters (no escape sequences), removing the `[worker]` prefix and putting its own back (a line cannot pass for a `[root]` line), cutting lines above 400 bytes and limiting the rate to 100 lines per 10 s (the number of dropped lines is logged). A hijacked worker can no longer pollute or fill the log.
 - **Worker watchdog.** The worker sends a sign of life every 10 s, but only if its receive, send and control threads have all run since the last one. The supervisor kills a worker that has been silent for 60 s, cleans up the network configuration and starts a new worker, so a hung worker no longer leaves the Mac without network.
 - **Resource limits.** Neither process can write a core file (it would contain the traffic or the configuration), and the worker is limited to 128 file descriptors.
 
@@ -15,6 +16,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - A router advertisement with a router lifetime of 0 (not a default router) is no longer used to configure IPv6.
 
 ### Added
+- **Log rotation.** `install.sh` installs `/etc/newsyslog.d/rndis-tether.conf` (above 1 MB, five compressed archives) and the supervisor reopens the log file when it is renamed or removed; `uninstall.sh` removes both. Not yet checked with the real `newsyslog` on a Mac.
 - **`rndis-tether --diagnose`**: a report for bug reports, with no `sudo` and no changes to the system. It shows the service (supervisor and worker), the USB devices with a network, ADB or MTP interface, the ADB state, the IPv4 and IPv6 routes of the tether, the DNS resolvers, the end of the log and a plain-language diagnosis (cable, tethering not enabled, service stopped, disabled from the menu, IPv6 blocked by the leak guard…). MAC addresses are cut after the vendor part, public IPv4 and global IPv6 addresses are masked and ADB serial numbers are not shown. The bug report form now asks for it.
 
 ### Security

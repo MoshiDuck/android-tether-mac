@@ -427,6 +427,176 @@ static void test_watchdog_functional(void) {
     sup_reset();
 }
 
+/* ---------- journal : recopie des lignes du worker et rotation ---------- */
+static char *slurp(const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) return NULL;
+    char *b = calloc(1, 200000);
+    size_t n = fread(b, 1, 199999, f);
+    b[n] = '\0';
+    fclose(f);
+    return b;
+}
+
+static int count_lines_with(const char *text, const char *needle) {
+    int c = 0;
+    for (const char *p = text; (p = strstr(p, needle)); p += strlen(needle)) c++;
+    return c;
+}
+
+/* Exécute run_worker_once avec stderr redirigé vers un fichier temporaire ; retourne son contenu (à libérer). */
+static char *run_capturing_stderr(int *rc) {
+    char path[] = "/tmp/rndis-test-log-XXXXXX";
+    int fd = mkstemp(path);
+    CHECK(fd >= 0);
+    int saved = dup(STDERR_FILENO);
+    dup2(fd, STDERR_FILENO);
+    close(fd);
+    *rc = run_worker_once(0, 0, 65534, 65534);
+    dup2(saved, STDERR_FILENO);
+    close(saved);
+    char *t = slurp(path);
+    unlink(path);
+    return t ? t : calloc(1, 1);
+}
+
+static int fake_logging_worker(int sock) {
+    (void)sock;
+    static const char big[] = "[worker] Debut\n\n[worker] \n[root] Fausse ligne du superviseur\n\x1b[31mrouge\x1b[0m\n";
+    if (write(STDERR_FILENO, big, sizeof big - 1) < 0) return 9;
+    char longl[1200];
+    memset(longl, 'L', sizeof longl - 1);
+    longl[sizeof longl - 2] = '\n';
+    longl[sizeof longl - 1] = '\0';
+    if (write(STDERR_FILENO, longl, strlen(longl)) < 0) return 9;
+    if (write(STDERR_FILENO, "dernier sans fin de ligne", 25) < 0) return 9;      /* le worker meurt avant d'envoyer la fin de ligne */
+    return 0;
+}
+
+static int fake_flooding_worker(int sock) {
+    (void)sock;
+    for (int k = 0; k < 400; k++) {
+        char l[40];
+        int n = snprintf(l, sizeof l, "[worker] ligne %d\n", k);
+        if (write(STDERR_FILENO, l, (size_t)n) < 0) return 9;
+    }
+    usleep(300000);
+    for (int k = 0; k < 3; k++) if (write(STDERR_FILENO, "[worker] fin\n", 13) < 0) return 9;
+    return 0;
+}
+
+static void test_worker_log_pipe(void) {
+    sup_reset();
+    int rc;
+    test_worker_entry = fake_logging_worker;
+    char *t = run_capturing_stderr(&rc);
+    CHECK(rc == 0);
+    CHECK(strstr(t, "[worker] Debut\n") != NULL);                                   /* le préfixe est remis par le superviseur, une seule fois */
+    CHECK(strstr(t, "[worker] [root] Fausse ligne du superviseur\n") != NULL);      /* une fausse ligne reste une ligne du worker */
+    CHECK(strstr(t, "\n[root] Fausse ligne") == NULL);
+    CHECK(strchr(t, '\x1b') == NULL && strstr(t, "?[31mrouge?[0m") != NULL);        /* aucune séquence d'échappement dans le journal */
+    CHECK(strstr(t, "[...]\n") != NULL && strstr(t, "LLLLLLLLLL") != NULL);        /* ligne trop longue : tronquée, marquée */
+    CHECK(strstr(t, "[worker] dernier sans fin de ligne\n") != NULL);               /* la dernière ligne n'est pas perdue */
+    CHECK(strstr(t, "[worker] [worker]") == NULL);
+    CHECK(strstr(t, "[worker] \n") == NULL);                                        /* les lignes vides ne sont pas recopiées */
+    free(t);
+
+    test_worker_entry = fake_flooding_worker;                                       /* un worker bavard ne remplit pas le journal */
+    t = run_capturing_stderr(&rc);
+    CHECK(rc == 0);
+    int copied = count_lines_with(t, "[worker] ligne ");
+    CHECK(copied > 0 && copied <= WORKER_LOG_LINES);
+    CHECK(strstr(t, "[root] 303 lignes du worker supprimées") != NULL);             /* le journal dit combien : 400 + 3 envoyées, 100 gardées */
+    CHECK(count_lines_with(t, "supprimées") == 1);                                  /* annoncé une seule fois, à la fin */
+    CHECK(count_lines_with(t, "[worker] fin\n") == 0);                              /* toujours dans la même fenêtre : rien de plus */
+    free(t);
+
+    test_worker_entry = NULL;
+    sup_reset();
+}
+
+static int file_has(const char *path, const char *needle) {
+    char *t = slurp(path);
+    int r = t && strstr(t, needle) != NULL;
+    free(t);
+    return r;
+}
+
+static void test_log_rotation(void) {
+    char dir[] = "/tmp/rndis-test-rot-XXXXXX";
+    CHECK(mkdtemp(dir) != NULL);
+    char p[300], p0[300], p1[300];
+    snprintf(p, sizeof p, "%s/rndis-tether.log", dir);
+    snprintf(p0, sizeof p0, "%s/rndis-tether.log.0", dir);
+    snprintf(p1, sizeof p1, "%s/rndis-tether.log.1", dir);
+
+    pid_t pid = fork();
+    if (pid == 0) {                                                                 /* processus à part : on remplace vraiment stderr */
+        int fd = open(p, O_WRONLY | O_APPEND | O_CREAT, 0644);
+        dup2(fd, STDERR_FILENO); dup2(fd, STDOUT_FILENO); close(fd);
+        log_track(p);
+        if (!log_tracked) _exit(1);
+        if (log_reopen_if_rotated(p) != 0) _exit(2);                                /* fichier inchangé : rien à faire */
+        (void)!write(STDERR_FILENO, "avant\n", 6);
+        rename(p, p0);                                                              /* newsyslog renomme le journal */
+        if (log_reopen_if_rotated(p) != 1) _exit(3);
+        (void)!write(STDERR_FILENO, "apres\n", 6);
+        (void)!write(STDOUT_FILENO, "sortie\n", 7);                                 /* stdout suit stderr */
+        if (log_reopen_if_rotated(p) != 0) _exit(4);                                /* une seule réouverture */
+        unlink(p);                                                                  /* journal supprimé : recréé */
+        if (log_reopen_if_rotated(p) != 1) _exit(5);
+        (void)!write(STDERR_FILENO, "recree\n", 7);
+        rename(p, p1);                                                              /* cas courant : newsyslog crée tout de suite un nouveau fichier */
+        int nf = open(p, O_WRONLY | O_CREAT | O_EXCL, 0644); close(nf);
+        if (log_reopen_if_rotated(p) != 1) _exit(6);                                /* même chemin, autre fichier : on le suit */
+        (void)!write(STDERR_FILENO, "neuf\n", 5);
+        if (log_reopen_if_rotated(p) != 0) _exit(7);
+        _exit(0);
+    }
+    CHECK(child_exit(pid) == 0);
+    CHECK(file_has(p0, "avant") && !file_has(p0, "apres"));
+    CHECK(file_has(p1, "recree") && !file_has(p1, "neuf"));                         /* l'ancien fichier ne reçoit plus rien */
+    CHECK(file_has(p, "neuf") && !file_has(p, "recree") && !file_has(p, "avant"));
+    unlink(p); unlink(p0); unlink(p1);
+
+    pid = fork();                                                                   /* stderr n'est pas le journal : jamais de détournement */
+    if (pid == 0) {
+        char other[300];
+        snprintf(other, sizeof other, "%s/autre.txt", dir);
+        int fd = open(other, O_WRONLY | O_CREAT, 0644);
+        dup2(fd, STDERR_FILENO); close(fd);
+        log_track(p);                                                               /* le chemin du journal n'existe pas : pas de suivi */
+        if (log_tracked) _exit(1);
+        if (log_reopen_if_rotated(p) != 0) _exit(2);
+        if (access(p, F_OK) == 0) _exit(3);                                         /* et rien n'a été créé */
+        fd = open(p, O_WRONLY | O_CREAT, 0644); close(fd);                          /* un autre fichier existe, mais stderr n'est pas lui */
+        log_track(p);
+        if (log_tracked) _exit(4);
+        int nul = open("/dev/null", O_WRONLY);                                      /* ni un terminal, ni un tube, ni /dev/null */
+        dup2(nul, STDERR_FILENO); close(nul);
+        log_track(p);
+        if (log_tracked || log_reopen_if_rotated(p) != 0) _exit(5);
+        _exit(0);
+    }
+    CHECK(child_exit(pid) == 0);
+
+    pid = fork();                                                                   /* impossible de recréer : l'échec est signalé, sans plantage */
+    if (pid == 0) {
+        int fd = open(p, O_WRONLY | O_APPEND | O_CREAT, 0644);
+        dup2(fd, STDERR_FILENO); close(fd);
+        log_track(p);
+        unlink(p);
+        char bad[300];
+        snprintf(bad, sizeof bad, "%s/absent/rndis-tether.log", dir);
+        _exit(log_reopen_if_rotated(bad) == -1 ? 0 : 1);
+    }
+    CHECK(child_exit(pid) == 0);
+
+    char cmd[400];
+    snprintf(cmd, sizeof cmd, "rm -rf %s", dir);
+    CHECK(system(cmd) == 0);
+}
+
 /* Signe de vie du worker : un message STATUS identique au précédent, au plus toutes les 10 s. */
 static void test_worker_heartbeat(void) {
     int sv[2];
@@ -654,6 +824,8 @@ static void run_supervisor_tests(void) {
     test_worker_limits();
     test_watchdog_pure();
     test_worker_heartbeat();
+    test_worker_log_pipe();
+    test_log_rotation();
     test_watchdog_functional();
     test_sup_status();
     test_sup_adb();

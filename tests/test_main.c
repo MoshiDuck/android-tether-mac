@@ -17,6 +17,7 @@ void run_dhcp_tests(void);
 void run_policy_tests(void);
 void run_ipc_tests(void);
 void run_diagnose_tests(void);
+void run_logsan_tests(void);
 
 static const uint8_t TEST_MAC[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x55};
 
@@ -670,6 +671,7 @@ int main(void) {
     run_policy_tests();
     run_ipc_tests();
     run_diagnose_tests();
+    run_logsan_tests();
     run_supervisor_tests();
     printf("%d vérifications, %d échec(s)\n", checks, failures);
     return failures ? 1 : 0;

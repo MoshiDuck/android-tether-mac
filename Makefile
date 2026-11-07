@@ -4,9 +4,9 @@ CFLAGS  ?= -O2 -Wall -Wextra
 override CFLAGS += $(shell pkg-config --cflags libusb-1.0) -DRNDIS_VERSION='"$(VERSION)"'
 LDLIBS  += $(shell pkg-config --libs libusb-1.0) -lpthread
 
-SRC  = src/main.c src/dhcp.c src/policy.c src/ipc.c src/diagnose.c
+SRC  = src/main.c src/dhcp.c src/policy.c src/ipc.c src/diagnose.c src/logsan.c
 HDR  = $(wildcard src/*.h)
-TEST_SRC = tests/test_main.c tests/test_dhcp.c tests/test_policy.c tests/test_ipc.c tests/test_diagnose.c src/dhcp.c src/policy.c src/ipc.c src/diagnose.c
+TEST_SRC = tests/test_main.c tests/test_dhcp.c tests/test_policy.c tests/test_ipc.c tests/test_diagnose.c tests/test_logsan.c src/dhcp.c src/policy.c src/ipc.c src/diagnose.c src/logsan.c
 
 # Avertissements stricts : utilisés par la CI (cible `strict`)
 STRICT_FLAGS = -O2 -Wall -Wextra -Wshadow -Wformat=2 -Wstrict-prototypes -Wpointer-arith -Wcast-qual \

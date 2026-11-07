@@ -91,7 +91,12 @@ Print a report for bug reports and exit. It needs no privileges and changes noth
 .SH FILES
 .TP
 .I /var/log/rndis-tether.log
-Log of the service. Lines are tagged [root] or [worker].
+Log of the service. Lines are tagged [root] or [worker]. The worker does not write to this file: the supervisor copies its output after removing control characters, cutting long lines and limiting the rate (100 lines per 10 seconds). The supervisor reopens the file after a rotation.
+.TP
+.I /etc/newsyslog.d/rndis-tether.conf
+Rotation of the log by
+.BR newsyslog (8):
+above 1 MB, five compressed archives.
 .TP
 .I /Users/Shared/rndis-tether.disabled
 If this file exists, the service stays idle. The menu bar app creates and removes it.

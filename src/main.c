@@ -48,6 +48,7 @@
 #include "dhcp.h"
 #include "diagnose.h"
 #include "ipc.h"
+#include "logsan.h"
 #include "policy.h"
 
 #ifndef RNDIS_VERSION
@@ -1211,21 +1212,116 @@ static int worker_main(int sock, unsigned vid, unsigned pid, uid_t uid, gid_t gi
     return worker_run(vid, pid);
 }
 
+/* ---------- Journal ----------
+ * Le worker n'écrit plus dans le fichier journal : ses sorties passent par un tube que le superviseur recopie
+ * après nettoyage (voir logsan.h) et limitation de débit. Un worker détourné ne peut donc pas se faire passer
+ * pour le superviseur, ni polluer ou remplir le journal. Le superviseur suit aussi la rotation du fichier. */
+#define LOG_FILE "/var/log/rndis-tether.log"
+#define WORKER_LOG_LINES 100            /* lignes recopiées au plus, par fenêtre de WORKER_LOG_WINDOW secondes */
+#define WORKER_LOG_WINDOW 10
+
+static dev_t log_dev;
+static ino_t log_ino;
+static int log_tracked;                 /* stderr est bien le fichier journal : on le suit */
+
+/* Retient le fichier journal si stderr en est un (service lancé par launchd) ; sinon (terminal, -v) ne fait rien. */
+static void log_track(const char *path) {
+    struct stat fs, ps;
+    log_tracked = 0;
+    if (fstat(STDERR_FILENO, &fs) < 0 || !S_ISREG(fs.st_mode)) return;
+    if (stat(path, &ps) < 0 || ps.st_dev != fs.st_dev || ps.st_ino != fs.st_ino) return;
+    log_dev = fs.st_dev; log_ino = fs.st_ino; log_tracked = 1;
+}
+
+/* Après une rotation (newsyslog renomme le fichier puis le compresse), launchd continue d'écrire dans l'ancien
+ * fichier : on rouvre le nouveau. Retourne 1 si c'est fait, 0 s'il n'y avait rien à faire, -1 en cas d'échec. */
+static int log_reopen_if_rotated(const char *path) {
+    struct stat ps, os;
+    if (!log_tracked) return 0;
+    if (stat(path, &ps) == 0 && ps.st_dev == log_dev && ps.st_ino == log_ino) return 0;
+    int fd = open(path, O_WRONLY | O_APPEND | O_CREAT, 0644);
+    if (fd < 0) return -1;
+    int out_same = fstat(STDOUT_FILENO, &os) == 0 && os.st_dev == log_dev && os.st_ino == log_ino;
+    dup2(fd, STDERR_FILENO);
+    if (out_same) dup2(fd, STDOUT_FILENO);                           /* la sortie de route(8) et ifconfig(8) va au même fichier */
+    close(fd);
+    if (stat(path, &ps) == 0) { log_dev = ps.st_dev; log_ino = ps.st_ino; }
+    return 1;
+}
+
+struct log_pump { int fd; int stop; pthread_t th; };
+
+static void log_emit(const char *raw, size_t n, struct rate_limit *rl, unsigned *dropped) {
+    char line[LOG_LINE_MAX];
+    if (!log_sanitize(raw, n, line, sizeof line)) return;
+    if (!rate_allow(rl, now_s(), WORKER_LOG_LINES, WORKER_LOG_WINDOW)) { (*dropped)++; return; }
+    if (*dropped) { fprintf(stderr, "[root] %u lignes du worker supprimées (trop de messages)\n", *dropped); *dropped = 0; }
+    fprintf(stderr, "[worker] %s\n", line);
+}
+
+/* Recopie les lignes du worker. S'arrête à la fin du tube, ou quand on le demande et qu'il n'y a plus rien à lire
+ * (un processus enfant du worker pourrait garder le tube ouvert). */
+static void *log_pump_thread(void *arg) {
+    struct log_pump *p = arg;
+    char buf[LOG_LINE_MAX * 2];
+    size_t have = 0;
+    struct rate_limit rl = {0, 0};
+    unsigned dropped = 0;
+    for (;;) {
+        struct pollfd pf = {.fd = p->fd, .events = POLLIN};
+        int pr = poll(&pf, 1, 200);
+        if (pr < 0 && errno != EINTR) break;
+        if (pr > 0) {
+            ssize_t n = read(p->fd, buf + have, sizeof buf - have);
+            if (n < 0 && errno == EINTR) continue;
+            if (n <= 0) break;                                       /* fin du tube : le worker a disparu */
+            have += (size_t)n;
+        } else if (pr == 0 && __atomic_load_n(&p->stop, __ATOMIC_ACQUIRE)) {
+            break;
+        }
+        size_t start = 0;
+        for (size_t i = 0; i < have; i++)
+            if (buf[i] == '\n') { log_emit(buf + start, i - start, &rl, &dropped); start = i + 1; }
+        if (have - start >= LOG_LINE_MAX) { log_emit(buf + start, have - start, &rl, &dropped); start = have; }   /* ligne sans fin */
+        memmove(buf, buf + start, have - start);
+        have -= start;
+    }
+    if (have) log_emit(buf, have, &rl, &dropped);
+    if (dropped) fprintf(stderr, "[root] %u lignes du worker supprimées (trop de messages)\n", dropped);
+    return NULL;
+}
+
 /* Lance un worker et le sert jusqu'à sa fin ; nettoie ensuite la configuration réseau. Retourne son code de sortie. */
 static int run_worker_once(unsigned vid, unsigned pid, uid_t uid, gid_t gid) {
     int sv[2], status = 0, reaped = 0;
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) < 0) { perror("socketpair"); return EXIT_FATAL; }
+    int lp[2] = {-1, -1};
+    if (pipe(lp) < 0) lp[0] = lp[1] = -1;                            /* sans tube : le worker hérite de stderr, comme avant */
     fflush(stderr);
     pid_t child = fork();
-    if (child < 0) { perror("fork"); close(sv[0]); close(sv[1]); return EXIT_FATAL; }
+    if (child < 0) {
+        perror("fork"); close(sv[0]); close(sv[1]);
+        if (lp[0] >= 0) { close(lp[0]); close(lp[1]); }
+        return EXIT_FATAL;
+    }
     if (child == 0) {
         close(sv[0]);
+        if (lp[0] >= 0) {                                            /* ses sorties vont au tube, plus au fichier journal */
+            dup2(lp[1], STDERR_FILENO); dup2(lp[1], STDOUT_FILENO);
+            close(lp[0]); close(lp[1]);
+        }
 #ifdef RNDIS_TESTING
         if (test_worker_entry) _exit(test_worker_entry(sv[1]));       /* faux worker des tests */
 #endif
         _exit(worker_main(sv[1], vid, pid, uid, gid));
     }
     close(sv[1]);
+    struct log_pump pump = {.fd = lp[0]};
+    int pumping = lp[0] >= 0;
+    if (pumping) {
+        close(lp[1]);
+        if (pthread_create(&pump.th, NULL, log_pump_thread, &pump) != 0) { pumping = 0; close(lp[0]); }
+    }
     utun_fd = -1; cfg4_done = cfg6_done = 0; my_ip = gw_ip = 0;
     v6_routes = v6_svc = v6_blocked = 0;
     struct rate_limit rl = {0, 0};
@@ -1253,6 +1349,7 @@ static int run_worker_once(unsigned vid, unsigned pid, uid_t uid, gid_t gid) {
             break;
         }
         status_tick(NULL);                                           /* rafraîchit le fichier d'état */
+        log_reopen_if_rotated(LOG_FILE);
         if (quit || is_disabled()) { kill(child, SIGTERM); break; }
         if (waitpid(child, &status, WNOHANG) == child) { reaped = 1; break; }
     }
@@ -1263,6 +1360,11 @@ static int run_worker_once(unsigned vid, unsigned pid, uid_t uid, gid_t gid) {
             if (waitpid(child, &status, WNOHANG) == child) reaped = 1; else usleep(100000);
         }
         if (!reaped) { kill(child, SIGKILL); waitpid(child, &status, 0); }
+    }
+    if (pumping) {                                                   /* dernières lignes du worker, puis fermeture du tube */
+        __atomic_store_n(&pump.stop, 1, __ATOMIC_RELEASE);
+        pthread_join(pump.th, NULL);
+        close(pump.fd);
     }
     unconfigure_iface();                                             /* routes, DNS : retirés par le superviseur, jamais par le worker */
     if (utun_fd >= 0) { close(utun_fd); utun_fd = -1; }
@@ -1278,6 +1380,7 @@ static int supervisor_main(unsigned vid, unsigned pid) {
     }
     uid_t uid = pw->pw_uid;
     gid_t gid = pw->pw_gid;
+    log_track(LOG_FILE);
     if (disable_core_dumps() < 0) LOG("Impossible de désactiver les fichiers core (%s)", strerror(errno));
     LOG("Superviseur %s démarré ; le worker tournera sans privilèges (utilisateur %s)", RNDIS_VERSION, worker_user);
     if (want_route && !allow_v6_leak) {                              /* routes « reject » restées d'un arrêt brutal précédent */
@@ -1286,7 +1389,7 @@ static int supervisor_main(unsigned vid, unsigned pid) {
     }
     int rc = 0;
     while (!quit) {
-        if (is_disabled()) { status_tick("disabled"); sleep(1); continue; }
+        if (is_disabled()) { status_tick("disabled"); log_reopen_if_rotated(LOG_FILE); sleep(1); continue; }
         time_t t0 = time(NULL);
         int code = run_worker_once(vid, pid, uid, gid);
         if (quit) break;

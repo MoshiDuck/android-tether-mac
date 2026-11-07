@@ -21,6 +21,7 @@ pkill -x rndis-tether 2>/dev/null || true
 rm -f "/Library/LaunchDaemons/$DAEMON_LABEL.plist" "$USER_HOME/Library/LaunchAgents/$AGENT_LABEL.plist"
 rm -f /usr/local/bin/rndis-tether /usr/local/share/man/man1/rndis-tether.1
 rm -rf /Applications/RNDISTether.app
-rm -f /Users/Shared/rndis-tether.disabled /Users/Shared/rndis-tether.status /var/log/rndis-tether.log
+rm -f /Users/Shared/rndis-tether.disabled /Users/Shared/rndis-tether.status /var/log/rndis-tether.log /var/log/rndis-tether.log.*
+rm -f /etc/newsyslog.d/rndis-tether.conf
 
 echo "rndis-tether désinstallé."
