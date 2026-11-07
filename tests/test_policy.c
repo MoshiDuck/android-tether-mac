@@ -14,6 +14,8 @@ static uint32_t ip4(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
     return v;
 }
 
+/* masque de longueur 0 à 32, jamais d'élément indéfini (décalage de 32) */
+static uint32_t sh_rand_mask(void);
 static uint32_t rng = 0x2545f491u;
 static uint32_t rnd(void) {
     rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
@@ -95,6 +97,51 @@ static void test_v4_property(void) {
     CHECK(accepted > 100000 && rejected > 10000);                                 /* les deux chemins sont bien exercés */
 }
 
+static void test_overlap(void) {
+    uint32_t m8 = ip4(255, 0, 0, 0), m15 = ip4(255, 254, 0, 0), m16 = ip4(255, 255, 0, 0);
+    uint32_t m20 = ip4(255, 255, 240, 0), m24 = ip4(255, 255, 255, 0), m30 = ip4(255, 255, 255, 252);
+
+    /* recouvrement brut */
+    CHECK(policy_subnets_overlap(ip4(192, 168, 1, 5), m24, ip4(192, 168, 1, 200), m24));       /* même réseau */
+    CHECK(!policy_subnets_overlap(ip4(192, 168, 1, 5), m24, ip4(192, 168, 2, 5), m24));        /* réseaux voisins */
+    CHECK(policy_subnets_overlap(ip4(10, 0, 0, 5), m8, ip4(10, 217, 123, 1), m24));            /* l'un contient l'autre */
+    CHECK(policy_subnets_overlap(ip4(10, 217, 123, 1), m24, ip4(10, 0, 0, 5), m8));            /* dans les deux sens */
+    CHECK(!policy_subnets_overlap(ip4(10, 0, 0, 5), m8, ip4(11, 0, 0, 5), m8));
+
+    /* garde : réseaux « ordinaires » de /16 à /30 */
+    CHECK(policy_check_overlap(ip4(192, 168, 1, 7), m24, ip4(192, 168, 1, 42), m24) == POLICY_OVERLAP);
+    CHECK(policy_check_overlap(ip4(172, 22, 208, 144), m24, ip4(172, 22, 209, 216), m20) == POLICY_OVERLAP); /* /24 dans un /20 */
+    CHECK(policy_check_overlap(ip4(10, 217, 123, 144), m24, ip4(172, 22, 209, 216), m20) == POLICY_OK);
+    CHECK(policy_check_overlap(ip4(192, 168, 1, 7), m24, ip4(192, 168, 2, 7), m24) == POLICY_OK);
+    CHECK(policy_check_overlap(ip4(10, 1, 2, 5), m30, ip4(10, 1, 2, 6), m30) == POLICY_OVERLAP);             /* limite haute /30 */
+    CHECK(policy_check_overlap(ip4(10, 1, 0, 9), m24, ip4(10, 1, 0, 1), m16) == POLICY_OVERLAP);             /* limite basse /16 */
+
+    /* ne bloquent pas : /8 d'entreprise, /15, adresse hôte (VPN), /31, masque nul ou non contigu */
+    CHECK(policy_check_overlap(ip4(10, 217, 123, 144), m24, ip4(10, 1, 2, 3), m8) == POLICY_OK);
+    CHECK(policy_check_overlap(ip4(10, 1, 2, 5), m24, ip4(10, 1, 2, 9), m15) == POLICY_OK);
+    CHECK(policy_check_overlap(ip4(10, 217, 123, 144), m24, ip4(10, 217, 123, 50), ip4(255, 255, 255, 255)) == POLICY_OK);
+    CHECK(policy_check_overlap(ip4(10, 217, 123, 144), m24, ip4(10, 217, 123, 50), ip4(255, 255, 255, 254)) == POLICY_OK);
+    CHECK(policy_check_overlap(ip4(10, 217, 123, 144), m24, ip4(10, 217, 123, 50), 0) == POLICY_OK);
+    CHECK(policy_check_overlap(ip4(10, 217, 123, 144), m24, ip4(10, 217, 123, 50), ip4(255, 0, 255, 0)) == POLICY_OK);
+}
+
+static void test_overlap_property(void) {
+    int refused = 0;
+    for (int iter = 0; iter < 400000; iter++) {
+        uint32_t ma = htonl(0xffffffffu << (2 + rnd() % 23)), mb = htonl(sh_rand_mask());
+        uint32_t a = rnd(), b = (iter & 1) ? ((a & ma) | (rnd() & ~ma)) : rnd();    /* souvent dans le même réseau */
+        int ab = policy_subnets_overlap(a, ma, b, mb), ba = policy_subnets_overlap(b, mb, a, ma);
+        CHECK(ab == ba);                                                          /* symétrique */
+        if (policy_check_overlap(a, ma, b, mb) == POLICY_OVERLAP) {
+            refused++;
+            int p = __builtin_popcount(ntohl(mb));
+            CHECK(ab && p >= 16 && p <= 30);                                      /* jamais de refus hors de la règle */
+        }
+        if (ma == mb && (a & ma) == (b & mb)) CHECK(ab);                          /* même réseau : toujours recouvrement */
+    }
+    CHECK(refused > 1000);
+}
+
 static void test_v6(void) {
     uint8_t global[16] = {0x26, 0x00, 0x03, 0x83, 0x0a, 0x44, 0x4d, 0x02, 0xe0, 0x93, 0x84, 0x46, 0x5f, 0xb7, 0xd7, 0x5f};
     uint8_t ula[16] = {0xfd, 0x12, 0x34, 0x56};
@@ -164,7 +211,14 @@ static void test_status_fuzz(void) {
     }
 }
 
+static uint32_t sh_rand_mask(void) {
+    uint32_t sh = rnd() % 33;
+    return sh >= 32 ? 0 : 0xffffffffu << sh;
+}
+
 void run_policy_tests(void) {
+    test_overlap();
+    test_overlap_property();
     test_v4_accepts();
     test_v4_rejects();
     test_v4_property();

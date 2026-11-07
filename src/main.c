@@ -21,6 +21,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <ifaddrs.h>
 #include <libusb.h>
 #include <net/if.h>
 #include <net/if_utun.h>
@@ -885,6 +886,7 @@ static void usage(const char *p) {
                     "  -U  utilisateur pour adb (défaut: SUDO_USER ; requis en LaunchDaemon)\n"
                     "  -W  utilisateur sans privilèges du worker (défaut: nobody)\n"
                     "  -4  IPv4 uniquement (désactive le relais IPv6)\n"
+                    "  -O  accepter un sous-réseau du téléphone qui recouvre un réseau déjà utilisé\n"
                     "  -v  logs détaillés\n"
                     "  -d  cibler un appareil précis (hex), ex: 18d1:4ee3\n"
                     "  -V  afficher la version\n", p, p);
@@ -893,6 +895,52 @@ static void usage(const char *p) {
 /* ---------- Superviseur (root) ---------- */
 static int cfg4_done, cfg6_done;        /* configuration déjà appliquée pour le worker courant */
 static time_t last_adb_run;
+static int allow_overlap;               /* -O : accepte un sous-réseau qui recouvre un réseau existant */
+
+/* Réseaux IPv4 actuellement connectés au Mac (hors boucle locale et hors notre interface utun). */
+struct connected_net { uint32_t ip, mask; };
+
+#ifdef RNDIS_TESTING
+int test_list_connected(struct connected_net *out, int max);   /* fourni par les tests */
+#endif
+
+static int list_connected(struct connected_net *out, int max) {
+#ifdef RNDIS_TESTING
+    return test_list_connected(out, max);
+#else
+    struct ifaddrs *all, *p;
+    int n = 0;
+    if (getifaddrs(&all) < 0) return 0;
+    for (p = all; p && n < max; p = p->ifa_next) {
+        if (!p->ifa_addr || !p->ifa_netmask || p->ifa_addr->sa_family != AF_INET) continue;
+        if (!(p->ifa_flags & IFF_UP) || (p->ifa_flags & IFF_LOOPBACK)) continue;
+        if (!strcmp(p->ifa_name, utun_name)) continue;
+        out[n].ip = ((struct sockaddr_in *)(void *)p->ifa_addr)->sin_addr.s_addr;
+        out[n].mask = ((struct sockaddr_in *)(void *)p->ifa_netmask)->sin_addr.s_addr;
+        n++;
+    }
+    freeifaddrs(all);
+    return n;
+#endif
+}
+
+/* Retourne un code POLICY_* non nul si le sous-réseau du téléphone masquerait un réseau déjà utilisé. */
+static int check_not_shadowing(uint32_t ip, uint32_t mask) {
+    struct connected_net nets[64];
+    int n = list_connected(nets, 64);
+    for (int k = 0; k < n; k++) {
+        if (policy_check_overlap(ip, mask, nets[k].ip, nets[k].mask) == POLICY_OK) continue;
+        char a[INET_ADDRSTRLEN], b[INET_ADDRSTRLEN];
+        uint32_t net = ip & mask, onet = nets[k].ip & nets[k].mask;
+        inet_ntop(AF_INET, &net, a, sizeof a);
+        inet_ntop(AF_INET, &onet, b, sizeof b);
+        LOG("Configuration IPv4 refusée : le sous-réseau %s/%d du téléphone recouvre un réseau déjà utilisé par ce Mac (%s/%d). "
+            "Changer le sous-réseau du téléphone, ou lancer avec -O pour l'accepter.",
+            a, __builtin_popcount(ntohl(mask)), b, __builtin_popcount(ntohl(nets[k].mask)));
+        return POLICY_OVERLAP;
+    }
+    return POLICY_OK;
+}
 
 /* Traite une demande du worker. Il ne peut demander que des actions précises, et chaque valeur
  * est validée par policy.c : un worker compromis ne peut pas faire exécuter autre chose. */
@@ -917,6 +965,7 @@ static void handle_request(int sock, const struct ipc_msg *rq) {
         memcpy(&mask, rq->data + 8, 4); memcpy(&dns, rq->data + 12, 4);
         int e = policy_check_v4(ip, gw, mask, dns);
         if (e) { LOG("Configuration IPv4 refusée : %s", policy_strerror(e)); rp.status = (uint8_t)e; break; }
+        if (!allow_overlap && (e = check_not_shadowing(ip, mask)) != POLICY_OK) { rp.status = (uint8_t)e; break; }
         memset(&L, 0, sizeof L);
         L.ip = ip; L.gw = gw; L.mask = mask; L.dns = dns;
         my_ip = ip; gw_ip = gw;
@@ -1086,8 +1135,9 @@ int main(int argc, char **argv) {
     unsigned vid = 0, pid = 0;
     int opt;
     if (argc > 1 && !strcmp(argv[1], "--version")) { printf("rndis-tether %s\n", RNDIS_VERSION); return 0; }
-    while ((opt = getopt(argc, argv, "rwavd:U:W:4Vh")) != -1) {
+    while ((opt = getopt(argc, argv, "rwavd:U:W:4OVh")) != -1) {
         switch (opt) {
+        case 'O': allow_overlap = 1; break;
         case 'V': printf("rndis-tether %s\n", RNDIS_VERSION); return 0;
         case '4': ipv6_on = 0; break;
         case 'U': adb_user = optarg; break;

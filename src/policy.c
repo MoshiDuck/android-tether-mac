@@ -32,6 +32,20 @@ int policy_check_v4(uint32_t ip, uint32_t gw, uint32_t mask, uint32_t dns) {
     return POLICY_OK;
 }
 
+int policy_subnets_overlap(uint32_t ip_a, uint32_t mask_a, uint32_t ip_b, uint32_t mask_b) {
+    uint32_t a = ntohl(ip_a), ma = ntohl(mask_a), b = ntohl(ip_b), mb = ntohl(mask_b);
+    uint32_t wide = ma < mb ? ma : mb;              /* masque contigu : le plus petit est le réseau le plus large */
+    return (a & wide) == (b & wide);
+}
+
+int policy_check_overlap(uint32_t ip, uint32_t mask, uint32_t other_ip, uint32_t other_mask) {
+    uint32_t om = ntohl(other_mask);
+    if (om == 0 || (~om & (~om + 1)) != 0) return POLICY_OK;      /* masque inexploitable : on ne juge pas */
+    int prefix = __builtin_popcount(om);
+    if (prefix < 16 || prefix > 30) return POLICY_OK;
+    return policy_subnets_overlap(ip, mask, other_ip, other_mask) ? POLICY_OVERLAP : POLICY_OK;
+}
+
 int policy_check_v6(const uint8_t addr[16], const uint8_t router[16]) {
     int global = (addr[0] & 0xe0) == 0x20;          /* 2000::/3 */
     int ula = (addr[0] & 0xfe) == 0xfc;             /* fc00::/7 */
@@ -81,6 +95,7 @@ const char *policy_strerror(int err) {
     case POLICY_BAD_V6_ADDR: return "adresse IPv6 refusée";
     case POLICY_BAD_V6_ROUTER: return "routeur IPv6 refusé";
     case POLICY_BAD_STATUS: return "état refusé";
+    case POLICY_OVERLAP: return "sous-réseau déjà utilisé par ce Mac";
     default: return "erreur inconnue";
     }
 }
