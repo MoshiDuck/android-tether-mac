@@ -40,6 +40,13 @@ tethermac-install        # asks for your password once; installs the service + m
 
 Update later with `brew upgrade android-tether-mac && tethermac-install`.
 
+**Latest development version** (every change on `main`, tested by CI on each push):
+
+```sh
+brew install --HEAD MoshiDuck/tap/android-tether-mac
+brew upgrade --fetch-HEAD android-tether-mac && tethermac-install   # to update it later
+```
+
 ### From source
 
 ```sh

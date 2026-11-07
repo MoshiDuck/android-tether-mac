@@ -38,6 +38,18 @@ jobs:
       - name: Build menu bar app
         run: menubar/build.sh
 
+  brew-head:
+    name: Homebrew HEAD install
+    # À chaque push sur main : la dernière version du dépôt doit toujours s'installer via Homebrew
+    if: github.event_name == 'push'
+    runs-on: macos-latest
+    steps:
+      - name: Install the tap formula from HEAD and run its test
+        run: |
+          brew tap MoshiDuck/tap
+          brew install --HEAD MoshiDuck/tap/android-tether-mac
+          brew test MoshiDuck/tap/android-tether-mac
+
   quality:
     name: Static analysis, coverage, lint
     runs-on: macos-latest
