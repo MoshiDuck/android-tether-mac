@@ -39,6 +39,9 @@ rm -rf "$APP"
 cp -R "$HERE/menubar/build/RNDISTether.app" "$APP"
 mkdir -p /usr/local/share/man/man1
 install -m 644 "$HERE/man/rndis-tether.1" /usr/local/share/man/man1/rndis-tether.1
+# rotation du journal (newsyslog) : 1 Mo, cinq archives compressées
+mkdir -p /etc/newsyslog.d
+install -m 644 -o root -g wheel "$HERE/etc/rndis-tether.newsyslog.conf" /etc/newsyslog.d/rndis-tether.conf
 
 cat > "$DAEMON_PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
