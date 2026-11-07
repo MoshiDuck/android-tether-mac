@@ -75,6 +75,7 @@ sudo ./rndis-tether -v -r -w -a
 | `-a` | Enable tethering on the phone through `adb` (needs USB debugging) |
 | `-4` | IPv4 only (turn the IPv6 relay off) |
 | `-W user` | Unprivileged user for the worker process (default `nobody`) |
+| `-L` | With `-r`, let IPv6 leave through the Mac's other networks when the tether has none (otherwise it is blocked) |
 | `-O` | Accept a phone subnet that overlaps a network already in use (refused by default) |
 | `-V`, `--version` | Print the version |
 | `-U user` | User to run `adb` as (default `$SUDO_USER`; set by the LaunchDaemon) |
@@ -105,9 +106,9 @@ This has only been tested on a **Samsung Galaxy S24 Ultra**. Other phones should
 
 ## Limitations
 
-- IPv6 needs the phone to advertise a `/64` prefix (it did on the tested phone, on mobile data); otherwise the tether stays IPv4-only. Android does not delegate a prefix when the phone's own internet comes from Wi-Fi. In that case, if another network of the Mac has IPv6, IPv6 traffic keeps using that network instead of the phone (IPv4 still goes through the phone). IPv6-only DNS servers announced by the router are not used. Use `-4` to turn IPv6 off. IPv6 is not faster than IPv4 here — the mobile network dominates
+- IPv6 needs the phone to advertise a `/64` prefix (it did on the tested phone, on mobile data); otherwise the tether stays IPv4-only. Android does not delegate a prefix when the phone's own internet comes from Wi-Fi. In that case, with `-r`, the supervisor blocks IPv6 towards the Internet (two `reject` routes) so that nothing bypasses the phone: applications fall back to IPv4, which goes through the phone, and local IPv6 networks stay reachable. `-L` keeps the previous behaviour (IPv6 leaves through the other network). IPv6-only DNS servers announced by the router are not used. Use `-4` to turn IPv6 off. IPv6 is not faster than IPv4 here — the mobile network dominates
 - DHCP: the unicast renewal at T1 has been observed on the tested phone (RFC 2131 form, accepted by its server); the rebind at T2 and the expiry path are covered by simulated-clock tests but not yet seen on a real lease
-- If the supervisor is killed with `kill -9`, the routes `0.0.0.0/1` and `128.0.0.0/1` may remain: `sudo route -n delete -net 0.0.0.0/1` and `128.0.0.0/1`
+- If the supervisor is killed with `kill -9`, the routes `0.0.0.0/1` and `128.0.0.0/1` may remain: `sudo route -n delete -net 0.0.0.0/1` and `128.0.0.0/1`. The IPv6 `reject` routes are removed when the service starts again, or with `sudo route -n delete -inet6 -net ::/1 ::1` and `sudo route -n delete -inet6 -net 8000::/1 ::1`
 
 ## Development
 

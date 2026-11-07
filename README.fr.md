@@ -43,6 +43,7 @@ sudo ./rndis-tether -v -r -w -a
 - `-a` active le Modem USB du téléphone via `adb` (débogage USB requis)
 - `-4` IPv4 uniquement (désactive le relais IPv6)
 - `-W user` utilisateur sans privilèges du processus worker (défaut `nobody`)
+- `-L` avec `-r`, laisse l'IPv6 sortir par les autres réseaux du Mac quand le tethering n'en a pas (sinon elle est bloquée)
 - `-O` accepte un sous-réseau du téléphone qui recouvre un réseau déjà utilisé (refusé par défaut)
 - `-V`, `--version` affiche la version
 - `-U user` utilisateur pour `adb` (défaut `$SUDO_USER`)
@@ -63,7 +64,7 @@ Où va le projet : [ROADMAP.fr.md](ROADMAP.fr.md).
 - IPv6 demande que le téléphone annonce un préfixe `/64` (c'était le cas sur le téléphone testé, en données mobiles) ; sinon le tethering reste en IPv4. Android ne délègue pas de préfixe quand l'accès Internet du téléphone vient d'un Wi-Fi : si un autre réseau du Mac a de l'IPv6, le trafic IPv6 continue alors d'utiliser ce réseau au lieu du téléphone (l'IPv4 passe toujours par le téléphone). `-4` désactive IPv6. IPv6 n'est pas plus rapide qu'IPv4 ici : le réseau mobile domine
 - Testé uniquement sur un **Samsung Galaxy S24 Ultra** (`04e8:6864`). Les autres téléphones ne sont pas testés : les retours sont les bienvenus (issue avec modèle et sortie de `sudo ./rndis-tether -v -r -a`)
 - DHCP : le renouvellement unicast à T1 a été observé sur le téléphone testé (forme RFC 2131, acceptée par son serveur) ; le rebind à T2 et l'expiration sont couverts par des tests à horloge simulée mais pas encore vus sur un vrai bail
-- Si le superviseur est tué avec `kill -9`, les routes `0.0.0.0/1` et `128.0.0.0/1` peuvent rester : `sudo route -n delete -net 0.0.0.0/1` et `128.0.0.0/1`
+- Si le superviseur est tué avec `kill -9`, les routes `0.0.0.0/1` et `128.0.0.0/1` peuvent rester : `sudo route -n delete -net 0.0.0.0/1` et `128.0.0.0/1`. Les routes IPv6 « reject » sont retirées au redémarrage du service, ou avec `sudo route -n delete -inet6 -net ::/1 ::1` et `sudo route -n delete -inet6 -net 8000::/1 ::1`
 - Si le téléphone propose CDC-NCM/ECM, macOS le gère déjà nativement
 
 ## Contribuer et licence

@@ -49,7 +49,7 @@ Released as 0.3.0. Validated on the Galaxy S24 Ultra: `DHCPRELEASE` at the end o
 - ⬜ **IPv6 completeness** — track RA lifetimes and prefix changes (today only the first RA is used), RDNSS DNS servers, the RA MTU option, optional temporary addresses.
 - ⬜ **MTU and TCP MSS** — honour the path MTU, optional MSS clamping for networks that drop fragments.
 - ⬜ **Robust `adb` handling** — several devices (`adb -s`), none authorised, USB debugging disabled: clear messages instead of silent failure.
-- ⬜ **IPv6 leak guard** — with `-r`, when the tether provides no IPv6 (for example because the phone's own internet comes from Wi-Fi) but another network of the Mac does, IPv6 traffic bypasses the phone. Find a safe way to block it (so apps fall back to IPv4 through the phone), and test it on a real phone.
+- ✅ **IPv6 leak guard** *(code and tests done; live check on a phone whose internet comes from Wi-Fi pending)* — with `-r`, when the tether provides no IPv6 (for example because the phone's own internet comes from Wi-Fi) but another network of the Mac does, IPv6 traffic bypasses the phone. Find a safe way to block it (so apps fall back to IPv4 through the phone), and test it on a real phone.
 
 Exit criteria: the sandbox is on by default; `--diagnose` documented in the issue templates; sleep/wake tested.
 

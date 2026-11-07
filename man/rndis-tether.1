@@ -52,6 +52,12 @@ when no RNDIS device is found. USB debugging must be enabled and authorised.
 .B \-4
 IPv4 only: do not relay IPv6.
 .TP
+.B \-L
+With
+.BR \-r ,
+let IPv6 leave through the Mac's other networks when the tether has no IPv6.
+By default IPv6 towards the Internet is then blocked with two reject routes, so that applications fall back to IPv4 through the phone.
+.TP
 .B \-O
 Accept a phone subnet that overlaps a network already connected to the Mac.
 By default such a subnet is refused, so that a malicious phone cannot shadow a local network.

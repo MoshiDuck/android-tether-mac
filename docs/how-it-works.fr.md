@@ -94,7 +94,7 @@ Après le DHCP, le driver lance `ifconfig` pour fixer l'adresse de l'interface `
 
 ### Routes (`-r`)
 
-Au lieu de remplacer la route par défaut, il ajoute deux routes **plus précises**, `0.0.0.0/1` et `128.0.0.0/1`, via le téléphone. Ensemble elles couvrent tout IPv4 et priment sur la route par défaut, mais celle-ci reste intacte. Retirer ces deux routes remet tout comme avant. Quand une adresse IPv6 a été configurée, la même méthode s'applique avec `::/1` et `8000::/1`, pour que le trafic IPv6 ne contourne pas le tethering par le Wi-Fi.
+Au lieu de remplacer la route par défaut, il ajoute deux routes **plus précises**, `0.0.0.0/1` et `128.0.0.0/1`, via le téléphone. Ensemble elles couvrent tout IPv4 et priment sur la route par défaut, mais celle-ci reste intacte. Retirer ces deux routes remet tout comme avant. Quand une adresse IPv6 a été configurée, la même méthode s'applique avec `::/1` et `8000::/1`, pour que le trafic IPv6 ne contourne pas le tethering par le Wi-Fi. Si le tethering n'a pas d'IPv6 (Android ne délègue pas de préfixe quand l'accès Internet du téléphone vient d'un Wi-Fi), le superviseur installe ces deux mêmes routes en mode « reject » : les destinations IPv6 hors des réseaux locaux échouent aussitôt, et les applications se rabattent sur l'IPv4, qui passe par le téléphone. Les réseaux IPv6 locaux continuent de fonctionner, car leurs routes sont plus précises. Les routes « reject » sont remplacées par les vraies si le tethering obtient de l'IPv6 plus tard, retirées à la fin de la session, et aussi nettoyées au démarrage du service. `-L` désactive ce mécanisme.
 
 ### DNS
 

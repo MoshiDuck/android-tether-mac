@@ -49,7 +49,7 @@ Publiée en 0.3.0. Validée sur le Galaxy S24 Ultra : `DHCPRELEASE` à la fin d'
 - ⬜ **IPv6 complet** — suivre durées de vie et changements de préfixe des RA (aujourd'hui seule la première est utilisée), serveurs DNS RDNSS, option MTU de la RA, adresses temporaires optionnelles.
 - ⬜ **MTU et MSS TCP** — respecter la MTU du chemin, écrêtage du MSS optionnel pour les réseaux qui jettent les fragments.
 - ⬜ **`adb` robuste** — plusieurs appareils (`adb -s`), aucun autorisé, débogage USB désactivé : des messages clairs plutôt qu'un échec silencieux.
-- ⬜ **Garde contre la fuite IPv6** — avec `-r`, quand le tethering ne fournit pas d'IPv6 (par exemple parce que l'accès Internet du téléphone vient d'un Wi-Fi) mais qu'un autre réseau du Mac en a, le trafic IPv6 contourne le téléphone. Trouver une façon sûre de le bloquer (pour que les applications se rabattent sur l'IPv4 via le téléphone), et la tester sur un vrai téléphone.
+- ✅ **Garde contre la fuite IPv6** *(code et tests faits ; vérification réelle sur un téléphone dont l'accès vient d'un Wi-Fi à faire)* — avec `-r`, quand le tethering ne fournit pas d'IPv6 (par exemple parce que l'accès Internet du téléphone vient d'un Wi-Fi) mais qu'un autre réseau du Mac en a, le trafic IPv6 contourne le téléphone. Trouver une façon sûre de le bloquer (pour que les applications se rabattent sur l'IPv4 via le téléphone), et la tester sur un vrai téléphone.
 
 Critères de sortie : le bac à sable actif par défaut ; `--diagnose` cité dans les modèles de tickets ; veille/réveil testé.
 

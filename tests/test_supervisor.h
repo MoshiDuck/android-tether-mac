@@ -14,6 +14,19 @@ void test_record_command(const char *cmd) {
     if (ncmds < MAX_CMDS) snprintf(cmds[ncmds++], sizeof cmds[0], "%s", cmd);
 }
 
+static int cmd_index(const char *needle) {                           /* rang de la première commande contenant needle, ou -1 */
+    for (int k = 0; k < ncmds; k++)
+        if (strstr(cmds[k], needle)) return k;
+    return -1;
+}
+
+static int cmd_count(const char *needle) {                           /* nombre de commandes contenant needle */
+    int c = 0;
+    for (int k = 0; k < ncmds; k++)
+        if (strstr(cmds[k], needle)) c++;
+    return c;
+}
+
 static int cmd_has(const char *needle) {
     for (int k = 0; k < ncmds; k++)
         if (strstr(cmds[k], needle)) return 1;
@@ -46,6 +59,7 @@ static void sup_reset(void) {
     cfg4_done = cfg6_done = 0;
     my_ip = gw_ip = 0;
     v6_routes = v6_svc = dns_applied = 0;
+    v6_blocked = allow_v6_leak = 0;
     want_route = 1; ipv6_on = 1; auto_adb = 0; last_adb_run = 0; adb_user = NULL;
     worker_mode = 0; quit = 0; running = 1;
     snprintf(status_text, sizeof status_text, "starting");
@@ -186,6 +200,71 @@ static void test_sup_config6(void) {
     int before = ncmds;
     CHECK(sup_call(msg(IPC_REQ_CONFIG6, d, 32), &rp, &fd) == 1 && rp.status == 200);          /* une seule fois */
     CHECK(ncmds == before);
+}
+
+/* Avec -r, l'IPv6 ne fuit pas par un autre réseau tant que le tethering n'a pas d'IPv6. */
+static void test_sup_ipv6_leak_guard(void) {
+    struct ipc_msg rp;
+    int fd = -1;
+    const char *add_a = "/sbin/route -q -n add -inet6 -net ::/1 ::1 -reject";
+    const char *add_b = "/sbin/route -q -n add -inet6 -net 8000::/1 ::1 -reject";
+    const char *del_a = "/sbin/route -q -n delete -inet6 -net ::/1 ::1";
+    const char *del_b = "/sbin/route -q -n delete -inet6 -net 8000::/1 ::1";
+    uint8_t d6[32];
+    memcpy(d6, GLOBAL6, 16); memcpy(d6 + 16, ROUTER6, 16);
+
+    sup_reset();                                                    /* IPv4 appliqué : l'IPv6 est bloqué en attendant */
+    sup_utun();
+    CHECK(sup_call(msg(IPC_REQ_CONFIG4, CFG4_OK, 16), &rp, &fd) == 1 && rp.status == 0);
+    CHECK(cmd_has(add_a) && cmd_has(add_b) && v6_blocked == 1);
+    int n = ncmds;
+    block_ipv6();                                                   /* idempotent : aucune commande en double */
+    CHECK(ncmds == n);
+
+    CHECK(sup_call(msg(IPC_REQ_CONFIG6, d6, 32), &rp, &fd) == 1 && rp.status == 0);   /* le tethering a de l'IPv6 */
+    CHECK(v6_blocked == 0);
+    CHECK(cmd_has(del_a) && cmd_has(del_b));
+    int del = cmd_index(del_a), real = cmd_index("add -inet6 -net ::/1 -interface utun99");
+    CHECK(del >= 0 && real >= 0 && del < real);                     /* les routes « reject » partent AVANT les vraies routes */
+    CHECK(cmd_index(del_b) < cmd_index("add -inet6 -net 8000::/1 -interface utun99"));
+
+    sup_reset();                                                    /* IPv6 refusé par la politique : le blocage reste */
+    sup_utun();
+    CHECK(sup_call(msg(IPC_REQ_CONFIG4, CFG4_OK, 16), &rp, &fd) == 1 && rp.status == 0);
+    uint8_t bad6[32];
+    memcpy(bad6, d6, 32); memcpy(bad6, ROUTER6, 16);                /* adresse link-local : refusée */
+    CHECK(sup_call(msg(IPC_REQ_CONFIG6, bad6, 32), &rp, &fd) == 1 && rp.status == POLICY_BAD_V6_ADDR);
+    CHECK(v6_blocked == 1);
+
+    sup_reset();                                                    /* aucun IPv6 ne vient : le nettoyage retire le blocage */
+    sup_utun();
+    CHECK(sup_call(msg(IPC_REQ_CONFIG4, CFG4_OK, 16), &rp, &fd) == 1 && rp.status == 0);
+    ncmds = 0;
+    unconfigure_iface();
+    CHECK(cmd_has(del_a) && cmd_has(del_b) && v6_blocked == 0);
+    n = ncmds;
+    unconfigure_iface();                                            /* un second nettoyage ne rejoue pas la suppression */
+    CHECK(cmd_count(del_a) == 1 && cmd_count(del_b) == 1 && ncmds >= n);   /* les routes « reject » ne sont retirées qu'une fois */
+
+    sup_reset();                                                    /* -4 : pas d'IPv6 sur le tethering, mais le blocage s'applique */
+    ipv6_on = 0;
+    sup_utun();
+    CHECK(sup_call(msg(IPC_REQ_CONFIG4, CFG4_OK, 16), &rp, &fd) == 1 && rp.status == 0);
+    CHECK(cmd_has(add_a) && v6_blocked == 1);
+    CHECK(sup_call(msg(IPC_REQ_CONFIG6, d6, 32), &rp, &fd) == 1 && rp.status == 200 && v6_blocked == 1);   /* CONFIG6 refusé sous -4 */
+
+    sup_reset();                                                    /* sans -r : rien n'est bloqué */
+    want_route = 0;
+    sup_utun();
+    CHECK(sup_call(msg(IPC_REQ_CONFIG4, CFG4_OK, 16), &rp, &fd) == 1 && rp.status == 0);
+    CHECK(!cmd_has("-reject") && v6_blocked == 0);
+
+    sup_reset();                                                    /* -L : l'ancien comportement, aucun blocage */
+    allow_v6_leak = 1;
+    sup_utun();
+    CHECK(sup_call(msg(IPC_REQ_CONFIG4, CFG4_OK, 16), &rp, &fd) == 1 && rp.status == 0);
+    CHECK(!cmd_has("-reject") && v6_blocked == 0);
+    sup_reset();
 }
 
 static void test_sup_status(void) {
@@ -379,6 +458,7 @@ static void run_supervisor_tests(void) {
     test_list_connected_system();
     test_sup_config4();
     test_sup_overlap();
+    test_sup_ipv6_leak_guard();
     test_sup_config6();
     test_sup_status();
     test_sup_adb();
