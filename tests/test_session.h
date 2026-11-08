@@ -21,6 +21,7 @@ static struct {
     int unplug_after_s;                                              /* plafond : le téléphone est débranché au plus tard à ce moment */
     int64_t echo_at;                                                 /* instant du ping répondu : débranché 1 s plus tard */
     int echoes;
+    int nak_requests;                                                /* 1 : répond NAK à chaque REQUEST DHCP */
 } ph = {.lk = PTHREAD_MUTEX_INITIALIZER, .unplug_after_s = 20};
 
 static int ph_unplugged(void) {
@@ -146,7 +147,7 @@ static void ph_handle_frame(const uint8_t *f, int len) {
             o += 2 + o[1];
         }
         if (t == 1) ph_dhcp_reply(f, 2);                             /* DISCOVER -> OFFER */
-        else if (t == 3) ph_dhcp_reply(f, 5);                        /* REQUEST -> ACK */
+        else if (t == 3) ph_dhcp_reply(f, ph.nak_requests ? 6 : 5);  /* REQUEST -> ACK (ou NAK) */
     } else if (et == 0x0800 && len >= 14 + 20 + 8 && f[14 + 9] == 1 && f[14 + 20] == 8) {
         ph_echo_reply(f, len);                                       /* ping */
     } else if (et == 0x86DD && len >= 14 + 40 + 8 && f[14 + 6] == 58 && f[14 + 40] == 133) {
@@ -279,6 +280,28 @@ static void test_full_session(void) {
     sup_reset();
 }
 
+/* Un téléphone qui refuse tout bail : la session échoue, rien n'est configuré, rien ne reste à nettoyer. */
+static void test_session_dhcp_nak(void) {
+    sup_reset();
+    ph.qn = 0; ph.resp_len = 0; ph.echoes = 0; ph.echo_at = 0; ph.nak_requests = 1;
+    test_worker_entry = fake_session_worker;
+    int rc;
+    char *log = run_capturing_stderr(&rc);
+    test_worker_entry = NULL;
+    ph.nak_requests = 0;
+
+    CHECK(rc != 0);
+    CHECK(strstr(log, "Tethering actif") == NULL);
+    CHECK(!cmd_has("/sbin/ifconfig utun99 inet"));
+    CHECK(!cmd_has("route -q -n add -net 0.0.0.0/1"));
+    CHECK(!v6_routes && !v6_svc && !dns_applied);
+    free(log);
+    test_fake_usb = 0;
+    if (test_utun_peer >= 0) { close(test_utun_peer); test_utun_peer = -1; }
+    sup_reset();
+}
+
 static void run_session_tests(void) {
     test_full_session();
+    test_session_dhcp_nak();
 }
