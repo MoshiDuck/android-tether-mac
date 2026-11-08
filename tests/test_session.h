@@ -22,6 +22,9 @@ static struct {
     int64_t echo_at;                                                 /* instant du ping répondu : débranché 1 s plus tard */
     int echoes;
     int garbage;                                                     /* 1 : envoie des trames corrompues avant chaque réponse DHCP */
+    int lease_s;                                                     /* durée du bail annoncée (0 : 3600 s) */
+    int renew_nak;                                                   /* 1 : NAK à la 2e REQUEST (le renouvellement) */
+    int requests;                                                    /* REQUEST DHCP reçues */
     int nak_requests;                                                /* 1 : répond NAK à chaque REQUEST DHCP */
 } ph = {.lk = PTHREAD_MUTEX_INITIALIZER, .unplug_after_s = 20};
 
@@ -122,7 +125,10 @@ static void ph_dhcp_reply(const uint8_t *rq, uint8_t type) {
     *p++ = 3; *p++ = 4; memcpy(p, PH_IP4, 4); p += 4;
     *p++ = 6; *p++ = 4; memcpy(p, PH_IP4, 4); p += 4;
     *p++ = 26; *p++ = 2; *p++ = 1400 >> 8; *p++ = 1400 & 0xff;
-    *p++ = 51; *p++ = 4; *p++ = 0; *p++ = 0; *p++ = 0x0e; *p++ = 0x10;           /* 3600 s */
+    {
+        uint32_t ls = ph.lease_s ? (uint32_t)ph.lease_s : 3600;
+        *p++ = 51; *p++ = 4; putbe32(p, ls); p += 4;                                /* durée du bail */
+    }
     *p++ = 255;
     int bootp = (int)(p - o) < 300 ? 300 : (int)(p - o);
     int total = 14 + 20 + 8 + bootp;
@@ -166,7 +172,10 @@ static void ph_handle_frame(const uint8_t *f, int len) {
             o += 2 + o[1];
         }
         if (t == 1) ph_dhcp_reply(f, 2);                             /* DISCOVER -> OFFER */
-        else if (t == 3) ph_dhcp_reply(f, ph.nak_requests ? 6 : 5);  /* REQUEST -> ACK (ou NAK) */
+        else if (t == 3) {                                           /* REQUEST -> ACK (ou NAK) */
+            ph.requests++;
+            ph_dhcp_reply(f, ph.nak_requests || (ph.renew_nak && ph.requests >= 2) ? 6 : 5);
+        }
     } else if (et == 0x0800 && len >= 14 + 20 + 8 && f[14 + 9] == 1 && f[14 + 20] == 8) {
         ph_echo_reply(f, len);                                       /* ping */
     } else if (et == 0x86DD && len >= 14 + 40 + 8 && f[14 + 6] == 58 && f[14 + 40] == 133) {
@@ -214,12 +223,24 @@ int fake_usb_interrupt(libusb_device_handle *hd, unsigned char ep, unsigned char
     return ph_unplugged() ? LIBUSB_ERROR_NO_DEVICE : LIBUSB_ERROR_TIMEOUT;
 }
 
+/* Dans le worker : avance l'horloge pour atteindre T1 sans attendre, puis, plus tard, pour « débrancher » le téléphone. */
+static int ph_jump_t1_s;
+static void *ph_clock_thread(void *a) {
+    (void)a;
+    usleep(1500000);
+    test_clock_offset += ph_jump_t1_s;                              /* le renouvellement (T1) est dû */
+    usleep(1500000);
+    test_clock_offset += 1000;                                      /* fin de la session : le téléphone est débranché */
+    return NULL;
+}
+
 /* Le « worker » forké : la vraie session, sur le faux téléphone. */
 static int fake_session_worker(int sock) {
     worker_mode = 1;
     ipc_sock = sock;
     test_fake_usb = 1;
     ph.t0 = now_s();
+    if (ph_jump_t1_s) { pthread_t ct; pthread_create(&ct, NULL, ph_clock_thread, NULL); pthread_detach(ct); }
     h = (libusb_device_handle *)(uintptr_t)1;
     ctrl_if = 0; data_if = 1; ep_in = 0x81; ep_out = 0x02; ep_int = 0x83; mps_out = 512;
     return session();
@@ -340,8 +361,32 @@ static void test_session_garbage(void) {
     sup_reset();
 }
 
+/* Bail court : le client renouvelle à T1 (la moitié du bail). Le téléphone accepte, ou refuse (NAK) et la session repart. */
+static void test_session_renewal(int refuse) {
+    sup_reset();
+    ph.qn = 0; ph.resp_len = 0; ph.echoes = 0; ph.echo_at = 0; ph.requests = 0;
+    ph.lease_s = 60; ph.renew_nak = refuse; ph.unplug_after_s = 900; ph_jump_t1_s = 31;
+    test_worker_entry = fake_session_worker;
+    int rc;
+    char *log = run_capturing_stderr(&rc);
+    test_worker_entry = NULL;
+    ph.lease_s = 0; ph.renew_nak = 0; ph.unplug_after_s = 20; ph_jump_t1_s = 0;
+
+    CHECK(strstr(log, "Tethering actif") != NULL);
+    CHECK(strstr(log, "DHCP: demande de renouvellement (unicast)") != NULL);
+    if (refuse) CHECK(strstr(log, "renouvellement refusé (NAK)") != NULL);
+    else CHECK(strstr(log, "DHCP: bail renouvelé (60s") != NULL);
+    free(log);
+    test_fake_usb = 0;
+    if (test_utun_peer >= 0) { close(test_utun_peer); test_utun_peer = -1; }
+    sup_reset();
+    (void)rc;
+}
+
 static void run_session_tests(void) {
     test_full_session();
+    test_session_renewal(0);
+    test_session_renewal(1);
     test_session_garbage();
     test_session_dhcp_nak();
 }
