@@ -21,6 +21,7 @@ static struct {
     int unplug_after_s;                                              /* plafond : le téléphone est débranché au plus tard à ce moment */
     int64_t echo_at;                                                 /* instant du ping répondu : débranché 1 s plus tard */
     int echoes;
+    int garbage;                                                     /* 1 : envoie des trames corrompues avant chaque réponse DHCP */
     int nak_requests;                                                /* 1 : répond NAK à chaque REQUEST DHCP */
 } ph = {.lk = PTHREAD_MUTEX_INITIALIZER, .unplug_after_s = 20};
 
@@ -82,7 +83,25 @@ int fake_usb_control(libusb_device_handle *hd, uint8_t type, uint8_t req, uint16
 static uint16_t csum16(const uint8_t *p, int n) { return ip_csum(p, n); }
 
 /* Trame DHCP du serveur (OFFER ou ACK) pour la demande `rq` (trame Ethernet complète). */
+static void ph_garbage(void) {
+    uint8_t g[2300];
+    memset(g, 0xAB, sizeof g);
+    pthread_mutex_lock(&ph.lk);
+    for (int k = 0; k < 4 && ph.qn < 16; k++) {                      /* enveloppes RNDIS aux champs absurdes */
+        uint8_t *b = ph.q[ph.qn];
+        memset(b, 0, 64);
+        put32(b, RNDIS_PACKET_MSG);
+        put32(b + 4, k == 0 ? 0xFFFFFFF0u : 20 + 8 * k);             /* longueur totale démesurée ou trop courte */
+        put32(b + 8, k == 1 ? 0x7FFFFFFFu : 4000);                   /* décalage hors du tampon */
+        put32(b + 12, k == 2 ? 0xFFFFFFFFu : 3000);                  /* longueur de données hors du tampon */
+        ph.qlen[ph.qn++] = k == 3 ? 5 : 64;                          /* le dernier est tronqué avant même l'en-tête */
+    }
+    if (ph.qn < 16) { memcpy(ph.q[ph.qn], g, sizeof g); ph.qlen[ph.qn++] = (int)sizeof g; }   /* octets aléatoires */
+    pthread_mutex_unlock(&ph.lk);
+}
+
 static void ph_dhcp_reply(const uint8_t *rq, uint8_t type) {
+    if (ph.garbage) ph_garbage();
     uint8_t f[600];
     const uint8_t *b = rq + 14 + 20 + 8;
     memset(f, 0, sizeof f);
@@ -301,7 +320,28 @@ static void test_session_dhcp_nak(void) {
     sup_reset();
 }
 
+/* Un téléphone qui envoie des trames corrompues : elles sont ignorées, la session aboutit quand même. */
+static void test_session_garbage(void) {
+    sup_reset();
+    ph.qn = 0; ph.resp_len = 0; ph.echoes = 0; ph.echo_at = 0; ph.garbage = 1;
+    test_worker_entry = fake_session_worker;
+    int rc;
+    char *log = run_capturing_stderr(&rc);
+    test_worker_entry = NULL;
+    ph.garbage = 0;
+
+    CHECK(rc == 0);
+    CHECK(strstr(log, "Tethering actif") != NULL);
+    CHECK(cmd_has("/sbin/ifconfig utun99 inet 10.217.123.154"));
+    CHECK(strstr(log, "[root] Le worker ne donne plus") == NULL);
+    free(log);
+    test_fake_usb = 0;
+    if (test_utun_peer >= 0) { close(test_utun_peer); test_utun_peer = -1; }
+    sup_reset();
+}
+
 static void run_session_tests(void) {
     test_full_session();
+    test_session_garbage();
     test_session_dhcp_nak();
 }
