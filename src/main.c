@@ -1450,13 +1450,13 @@ static int run_worker_once(unsigned vid, unsigned pid, uid_t uid, gid_t gid) {
         /* Le worker repart d'un exec : un fork() seul laisse l'état du runtime Objective-C du superviseur
          * (CoreFoundation, libusb, getpwnam) dans le fils, qui plante après une veille. */
         if (self_exe[0] && g_argc < 40) {
-            char fdb[16], ub[16], gb[16];
+            char fdb[16], ub[16], gb[16], wflag[] = "--worker";
             char *av[48];
             int n = 0;
             snprintf(fdb, sizeof fdb, "%d", sv[1]);
             snprintf(ub, sizeof ub, "%u", (unsigned)uid);
             snprintf(gb, sizeof gb, "%u", (unsigned)gid);
-            av[n++] = self_exe; av[n++] = "--worker"; av[n++] = fdb; av[n++] = ub; av[n++] = gb;
+            av[n++] = self_exe; av[n++] = wflag; av[n++] = fdb; av[n++] = ub; av[n++] = gb;
             for (int i = 1; i < g_argc; i++) av[n++] = g_argv[i];
             av[n] = NULL;
             execv(self_exe, av);
