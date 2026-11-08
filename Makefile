@@ -35,13 +35,13 @@ analyze: $(SRC) $(HDR)
 	  if [ -n "$$out" ]; then echo "$$out"; exit 1; fi; \
 	done
 
-tests/test_main: $(TEST_SRC) src/main.c $(HDR) tests/check.h tests/test_supervisor.h
+tests/test_main: $(TEST_SRC) src/main.c $(HDR) tests/check.h tests/test_supervisor.h tests/test_session.h
 	$(CC) $(CFLAGS) $(TEST_FLAGS) -o $@ $(TEST_SRC) $(LDLIBS)
 
 test: tests/test_main
 	./tests/test_main
 
-tests/test_cov: $(TEST_SRC) src/main.c $(HDR) tests/check.h tests/test_supervisor.h
+tests/test_cov: $(TEST_SRC) src/main.c $(HDR) tests/check.h tests/test_supervisor.h tests/test_session.h
 	$(CC) $(CFLAGS) $(COV_FLAGS) -o $@ $(TEST_SRC) $(LDLIBS)
 
 # Rapport de couverture ; scripts/check-coverage.sh vérifie les seuils des modules purs
