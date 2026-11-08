@@ -1285,11 +1285,13 @@ static int worker_run(unsigned vid, unsigned pid) {
     if (libusb_init(&ctx)) { LOG("libusb_init a échoué"); return EXIT_FATAL; }
     int rc = 0, announced = 0;
     time_t last_adb = 0;
+    int adb_tries = 0;
     while (!quit && !is_disabled()) {
         int ok = find_device(vid, pid) == 0;
         if (!ok && auto_adb && time(NULL) - last_adb >= 10) {
             last_adb = time(NULL);
-            LOG("Activation du Modem USB via adb…");
+            if (adb_tries++ == 0) LOG("Activation du Modem USB via adb…");      /* une fois : le détail reste en mode verbeux */
+            else VLOG("Activation du Modem USB via adb… (essai %d)", adb_tries);
             request_adb();
             sleep(3);
             ok = find_device(vid, pid) == 0;
