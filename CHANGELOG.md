@@ -5,6 +5,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-08
+
 ### Security
 - **The worker no longer writes to the log file.** Its output goes through a pipe and the supervisor copies it after removing control characters (no escape sequences), removing the `[worker]` prefix and putting its own back (a line cannot pass for a `[root]` line), cutting lines above 400 bytes and limiting the rate to 100 lines per 10 s (the number of dropped lines is logged). A hijacked worker can no longer pollute or fill the log.
 - **Worker watchdog.** The worker sends a sign of life every 10 s, but only if its receive, send and control threads have all run since the last one. The supervisor kills a worker that has been silent for 60 s, cleans up the network configuration and starts a new worker, so a hung worker no longer leaves the Mac without network.
@@ -94,7 +96,8 @@ First public release.
 - Homebrew tap (`brew install MoshiDuck/tap/android-tether-mac`).
 - Tested on a Samsung Galaxy S24 Ultra (SM-S928B, Android 16, One UI 8).
 
-[Unreleased]: https://github.com/MoshiDuck/android-tether-mac/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/MoshiDuck/android-tether-mac/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/MoshiDuck/android-tether-mac/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/MoshiDuck/android-tether-mac/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/MoshiDuck/android-tether-mac/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/MoshiDuck/android-tether-mac/compare/v0.1.0...v0.1.1
