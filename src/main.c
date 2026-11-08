@@ -31,6 +31,7 @@
 #include <signal.h>
 #include <stdarg.h>
 #include <stdint.h>
+#include <mach-o/dyld.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1326,6 +1327,10 @@ static int worker_limits(void) {
     return setrlimit(RLIMIT_NOFILE, &rl);
 }
 
+static char self_exe[1024];              /* chemin de ce programme, pour relancer le worker par exec */
+static int g_argc;
+static char **g_argv;
+
 static int worker_main(int sock, unsigned vid, unsigned pid, uid_t uid, gid_t gid) {
     worker_mode = 1;
     ipc_sock = sock;
@@ -1440,6 +1445,23 @@ static int run_worker_once(unsigned vid, unsigned pid, uid_t uid, gid_t gid) {
         }
 #ifdef RNDIS_TESTING
         if (test_worker_entry) _exit(test_worker_entry(sv[1]));       /* faux worker des tests */
+#endif
+#ifndef RNDIS_TESTING
+        /* Le worker repart d'un exec : un fork() seul laisse l'état du runtime Objective-C du superviseur
+         * (CoreFoundation, libusb, getpwnam) dans le fils, qui plante après une veille. */
+        if (self_exe[0] && g_argc < 40) {
+            char fdb[16], ub[16], gb[16];
+            char *av[48];
+            int n = 0;
+            snprintf(fdb, sizeof fdb, "%d", sv[1]);
+            snprintf(ub, sizeof ub, "%u", (unsigned)uid);
+            snprintf(gb, sizeof gb, "%u", (unsigned)gid);
+            av[n++] = self_exe; av[n++] = "--worker"; av[n++] = fdb; av[n++] = ub; av[n++] = gb;
+            for (int i = 1; i < g_argc; i++) av[n++] = g_argv[i];
+            av[n] = NULL;
+            execv(self_exe, av);
+            LOG("exec du worker impossible (%s) : démarrage direct", strerror(errno));
+        }
 #endif
         _exit(worker_main(sv[1], vid, pid, uid, gid));
     }
@@ -1656,6 +1678,19 @@ static int diagnose_main(void) {
 int main(int argc, char **argv) {
     unsigned vid = 0, pid = 0;
     int opt;
+    int worker_fd = -1;
+    unsigned worker_uid = 0, worker_gid = 0;
+    {
+        uint32_t sz = sizeof self_exe - 1;
+        char tmp[1024];
+        if (_NSGetExecutablePath(tmp, &sz) == 0 && realpath(tmp, self_exe) == NULL) self_exe[0] = '\0';
+    }
+    g_argc = argc; g_argv = argv;
+    if (argc > 5 && !strcmp(argv[1], "--worker")) {          /* usage interne : relance du worker par le superviseur */
+        worker_fd = atoi(argv[2]); worker_uid = (unsigned)strtoul(argv[3], NULL, 10); worker_gid = (unsigned)strtoul(argv[4], NULL, 10);
+        argv[4] = argv[0]; argv += 4; argc -= 4;
+        if (worker_fd < 3) return 2;
+    }
     if (argc > 1 && !strcmp(argv[1], "--version")) { printf("rndis-tether %s\n", RNDIS_VERSION); return 0; }
     if (argc > 1 && !strcmp(argv[1], "--diagnose")) return diagnose_main();
     while ((opt = getopt(argc, argv, "rwavd:U:W:S:4OLVh")) != -1) {
@@ -1674,6 +1709,10 @@ int main(int argc, char **argv) {
         case 'd': if (sscanf(optarg, "%x:%x", &vid, &pid) != 2) { usage(argv[0]); return 2; } break;
         default: usage(argv[0]); return 2;
         }
+    }
+    if (worker_fd >= 0) {
+        signal(SIGINT, on_signal); signal(SIGTERM, on_signal); signal(SIGPIPE, SIG_IGN);
+        return worker_main(worker_fd, vid, pid, (uid_t)worker_uid, (gid_t)worker_gid);
     }
     if (geteuid() != 0) { LOG("Il faut les droits root : sudo %s", argv[0]); return 1; }
     signal(SIGINT, on_signal); signal(SIGTERM, on_signal); signal(SIGPIPE, SIG_IGN);
