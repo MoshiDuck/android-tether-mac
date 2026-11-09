@@ -179,10 +179,13 @@ static void ph_handle_frame(const uint8_t *f, int len) {
     } else if (et == 0x0800 && len >= 14 + 20 + 8 && f[14 + 9] == 1 && f[14 + 20] == 8) {
         ph_echo_reply(f, len);                                       /* ping */
     } else if (et == 0x86DD && len >= 14 + 40 + 8 && f[14 + 6] == 58 && f[14 + 40] == 133) {
-        uint8_t ra[300], opts[64];                                   /* sollicitation de routeur -> annonce avec préfixe et MTU */
+        uint8_t ra[300], opts[96];                                   /* sollicitation de routeur -> annonce avec préfixe et MTU */
         put_prefix_opt(opts, 64, 0xC0, 3600);
         put_mtu_opt(opts + 32, 1350);
-        int n = make_ra(ra, opts, 40);
+        memset(opts + 40, 0, 24);                                    /* RDNSS : 2001:4860:4860::8888 */
+        opts[40] = 25; opts[41] = 3; putbe32(opts + 44, 600);
+        memcpy(opts + 48, (uint8_t[]){0x20, 0x01, 0x48, 0x60, 0x48, 0x60, 0, 0, 0, 0, 0, 0, 0, 0, 0x88, 0x88}, 16);
+        int n = make_ra(ra, opts, 64);
         ph_deliver(ra, n);
     }
 }
@@ -297,6 +300,7 @@ static void test_full_session(void) {
     CHECK(cmd_has("prefixlen 64 alias"));
     CHECK(cmd_has("add -inet6 -net ::/1 -interface utun99"));
     CHECK(cmd_index("delete -inet6 -net ::/1 ::1") < cmd_index("add -inet6 -net ::/1 -interface utun99"));   /* blocage retiré avant les vraies routes */
+    CHECK(cmd_has("ServerAddresses * 10.217.123.221 2001:4860:4860::8888"));                 /* DNS IPv6 annoncé (RDNSS) */
     CHECK(cmd_has("/sbin/ifconfig utun99 mtu 1350"));                                      /* le plus petit des deux MTU */
     CHECK(strstr(log, "MTU de l'interface : 1350") != NULL);
 

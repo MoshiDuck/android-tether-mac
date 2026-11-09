@@ -269,8 +269,29 @@ static void test_mtu(void) {
     CHECK(strlen(policy_strerror(POLICY_BAD_MTU)) > 0 && strcmp(policy_strerror(POLICY_BAD_MTU), policy_strerror(999)) != 0);
 }
 
+static void test_dns6(void) {
+    uint8_t our[16] = {0x26, 0, 0x03, 0x83, 0x0a, 0x44, 0x4d, 0x02, 1, 2, 3, 4, 5, 6, 7, 8};
+    uint8_t d[16] = {0x20, 0x01, 0x48, 0x60, 0x48, 0x60};                     /* 2001:4860:4860::8888 */
+    d[14] = 0x88; d[15] = 0x88;
+    CHECK(policy_check_dns6(d, our) == OK);
+    memset(d, 0, 16); d[0] = 0xfd; d[15] = 1;                                 /* ULA */
+    CHECK(policy_check_dns6(d, our) == OK);
+    memset(d, 0, 16); d[0] = 0xfe; d[1] = 0x80; d[15] = 1;                    /* link-local */
+    CHECK(policy_check_dns6(d, our) == POLICY_BAD_V6_DNS);
+    memset(d, 0, 16); d[15] = 1;                                              /* ::1 */
+    CHECK(policy_check_dns6(d, our) == POLICY_BAD_V6_DNS);
+    memset(d, 0, 16);                                                         /* :: */
+    CHECK(policy_check_dns6(d, our) == POLICY_BAD_V6_DNS);
+    memset(d, 0, 16); d[0] = 0xff; d[1] = 2; d[15] = 1;                       /* multicast */
+    CHECK(policy_check_dns6(d, our) == POLICY_BAD_V6_DNS);
+    memcpy(d, our, 16);                                                       /* notre propre adresse */
+    CHECK(policy_check_dns6(d, our) == POLICY_BAD_V6_DNS);
+    CHECK(strlen(policy_strerror(POLICY_BAD_V6_DNS)) > 5);
+}
+
 void run_policy_tests(void) {
     test_mtu();
+    test_dns6();
     test_overlap();
     test_overlap_property();
     test_rate_limit();
