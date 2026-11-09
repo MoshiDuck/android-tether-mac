@@ -5,6 +5,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+### Added
+- Tests of the USB enumeration against fake devices (`tests/test_enum.h`): `find_device` (the normal phone, `-d` filtering, open failure, unreadable configuration, missing data interface, a vendor interface that is not the data interface, CDC-ECM message once) and the `--diagnose` USB section. `main.c` reads about 77 % of lines, total 84 %; CI thresholds rise to `main.c` 70 % and total 80 %.
+
 ### Changed
 - Coverage now includes the forked test workers (they write their profile before exiting): every forked test child writes its profile before it exits, so `main.c` reads about 71 % of lines instead of 51 %, total 80 % instead of 67 %. The CI thresholds rise to `main.c` 65 % and total 75 %.
 
