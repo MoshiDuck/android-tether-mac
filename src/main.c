@@ -86,7 +86,7 @@ static int ctrl_if = -1, data_if = -1;
 static uint8_t ep_in, ep_out, ep_int;
 static int mps_out = 512;
 
-static volatile sig_atomic_t running = 1, quit;
+static _Atomic int running = 1, quit;      /* lus et écrits par plusieurs threads et par le gestionnaire de signaux */
 static int verbose, want_route, wait_mode, dns_applied, auto_adb;
 static uint32_t srv_ip;               /* DHCP : serveur */
 static struct dhcp_client dhcp_c;     /* cycle de vie du bail (voir dhcp.c) ; protégé par dhcp_lock */
@@ -102,7 +102,7 @@ static int v6_pending;                /* adresse prête, à configurer par le th
 static int v6_withdraw;               /* le téléphone n'offre plus d'IPv6 : à retirer par le thread de contrôle */
 static int64_t v6_expire;             /* fin de validité du routeur (now_s) ; 0 = pas de suivi */
 static int v6_routes;                 /* routes ::/1 et 8000::/1 installées */
-static int cfg4_done, cfg6_done;        /* superviseur : configuration déjà appliquée pour le worker courant */
+static _Atomic int cfg4_done, cfg6_done; /* superviseur : configuration déjà appliquée pour le worker courant */
 static int v6_blocked;                /* routes « reject » installées : l'IPv6 ne peut pas fuir par un autre réseau */
 static int allow_v6_leak;             /* -L : ne pas bloquer l'IPv6 hors tethering */
 static int utun_fd = -1;
@@ -157,7 +157,7 @@ static void on_signal(int s) { (void)s; running = 0; quit = 1; }
 
 /* Horloge monotone en secondes : continue d'avancer pendant la veille du Mac (comme le bail DHCP). */
 #ifdef RNDIS_TESTING
-static volatile int64_t test_clock_offset;      /* les tests simulent une veille en avançant l'horloge */
+static _Atomic int64_t test_clock_offset;      /* les tests simulent une veille en avançant l'horloge */
 #endif
 static int64_t now_s(void) {
     struct timespec t;

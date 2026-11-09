@@ -52,7 +52,15 @@ coverage: tests/test_cov
 	$(LLVM_COV) report ./tests/test_cov -instr-profile=tests/cov.profdata $(SRC)
 
 clean:
-	rm -f rndis-tether tests/test_main tests/test_cov tests/cov.profraw tests/cov.profdata
-	rm -rf tests/test_main.dSYM tests/test_cov.dSYM
+	rm -f rndis-tether tests/test_main tests/test_tsan tests/test_cov tests/cov.profraw tests/cov.profdata
+	rm -rf tests/test_main.dSYM tests/test_tsan.dSYM tests/test_cov.dSYM
 
-.PHONY: strict analyze test coverage clean
+# Détection de courses de données entre threads (ThreadSanitizer) : mêmes tests, y compris la session complète.
+# die_after_fork=0 : les workers de test sont des fork() d'un processus qui a déjà des threads.
+tests/test_tsan: $(TEST_SRC) src/main.c $(HDR) tests/check.h tests/test_supervisor.h tests/test_session.h
+	$(CC) $(CFLAGS) -g -O1 -fno-omit-frame-pointer -fsanitize=thread -DRNDIS_TESTING -o $@ $(TEST_SRC) $(LDLIBS)
+
+tsan: tests/test_tsan
+	TSAN_OPTIONS="die_after_fork=0 halt_on_error=0 exitcode=66" ./tests/test_tsan
+
+.PHONY: strict analyze test tsan coverage clean

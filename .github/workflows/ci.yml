@@ -67,6 +67,9 @@ jobs:
       - name: Clang static analyzer
         run: make analyze
 
+      - name: Data races (ThreadSanitizer)
+        run: make tsan
+
       - name: Coverage report and thresholds
         run: |
           make coverage | tee coverage.txt

@@ -59,7 +59,7 @@ Today `main.c` is covered at 44 %; the untested part is exactly the USB and sess
 
 - ⬜ **USB abstraction layer** — put libusb behind a small interface (`usb_ops`) so the session code can run against a **fake device**.
 - 🟡 **Fake RNDIS phone** — ✅ first version (`tests/test_session.h`): the real worker session runs in a forked process against a fake phone that speaks the RNDIS handshake, answers DHCP (with an MTU), answers the router solicitation with a prefix and an MTU, and answers a ping; the real supervisor serves it in the test process, with `ifconfig`/`route`/`scutil` recorded. It checks what would be configured, that a ping crosses the whole path, and that everything is cleaned up, with no phone and no root. A test macro swaps libusb for the fake (`RNDIS_TESTING`). Still to do: DHCP NAK and renewal, NDP, and a phone that misbehaves on purpose (truncated, oversized or out-of-order messages, vanishing mid-session).
-- ⬜ **ThreadSanitizer job** — once sessions run under test, check the three-thread design for data races.
+- ✅ **ThreadSanitizer job** — `make tsan` runs every test, including the whole-session test, under ThreadSanitizer and is a CI step. It found real races on the `running`/`quit` flags (now atomic); it reports none today.
 - ⬜ **Fuzz targets with libFuzzer** (Homebrew LLVM), seed corpora, and continuous fuzzing (OSS-Fuzz once the project qualifies).
 - ⬜ **Modularisation** — split `main.c` into `rndis`, `usbdev`, `ndp`, `session`, `supervisor`, `worker`; remove the `RNDIS_TESTING` hooks in favour of dependency injection.
 - ⬜ **Mutation testing** on `dhcp.c` and `policy.c` to prove the tests actually bite.
