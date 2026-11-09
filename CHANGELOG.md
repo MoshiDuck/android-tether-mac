@@ -7,6 +7,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ### Added
 - **IPv6 DNS server of the phone (RDNSS).** When the router advertisement carries an RDNSS option (lifetime above zero), the first address is validated by the supervisor (global or unique-local only: never link-local, loopback, multicast, unspecified or our own address) and published after the IPv4 DNS server in the resolver (`ServerAddresses`). It is removed together with the IPv6 (the resolver is republished with the IPv4 server only). The server is taken from the advertisement that installs the IPv6; a later change of the RDNSS is not followed. The `CONFIG6` request grows from 32/34 to 50 bytes with the optional server. Not validated on a real phone yet.
+- `make tsan` runs all the tests, including the whole-session test, under ThreadSanitizer; it is a CI step. It currently reports no race.
+
+### Fixed
+- Data races found by ThreadSanitizer: the `running` and `quit` flags (read by the receive, send, control and main threads and written by a signal handler) are now atomic instead of `volatile sig_atomic_t`, and so are the supervisor's `cfg4_done` and `cfg6_done`. Nothing misbehaved on the Macs tested, but a plain `volatile` is not a synchronisation.
 
 ## [0.4.0] - 2026-11-08
 

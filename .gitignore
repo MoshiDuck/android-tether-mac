@@ -4,6 +4,8 @@ tests/test_main.dSYM/
 menubar/build/
 .DS_Store
 tests/test_cov
+tests/test_tsan
+tests/test_tsan.dSYM/
 tests/test_cov.dSYM/
 tests/cov.profraw
 tests/cov.profdata
