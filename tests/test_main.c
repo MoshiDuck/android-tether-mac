@@ -877,6 +877,7 @@ static void test_renew_ack(void) {
 }
 
 #include "test_session.h"
+#include "test_enum.h"
 
 int main(void) {
     test_byte_helpers();
@@ -908,6 +909,7 @@ int main(void) {
     run_adb_tests();
     run_supervisor_tests();
     run_session_tests();
+    run_enum_tests();
     printf("%d vérifications, %d échec(s)\n", checks, failures);
     return failures ? 1 : 0;
 }
