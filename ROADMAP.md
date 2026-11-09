@@ -55,7 +55,7 @@ Exit criteria: `--diagnose` documented in the issue templates (done); the new be
 
 ## 0.5.0 — Hardware-free integration tests
 
-Today `main.c` is covered at about 71 % of its lines (the forked test workers now write their coverage profile too; it used to read 44 %, because the whole session ran in a process that exited without writing it); the untested part is exactly the USB and session loop that real phones exercise.
+Today `main.c` is covered at about 77 % of its lines (the forked test workers now write their coverage profile too; it used to read 44 %, because the whole session ran in a process that exited without writing it); the untested part is exactly the USB and session loop that real phones exercise.
 
 - ⬜ **USB abstraction layer** — put libusb behind a small interface (`usb_ops`) so the session code can run against a **fake device**.
 - 🟡 **Fake RNDIS phone** — ✅ first version (`tests/test_session.h`): the real worker session runs in a forked process against a fake phone that speaks the RNDIS handshake, answers DHCP (with an MTU), answers the router solicitation with a prefix and an MTU, and answers a ping; the real supervisor serves it in the test process, with `ifconfig`/`route`/`scutil` recorded. It checks what would be configured, that a ping crosses the whole path, and that everything is cleaned up, with no phone and no root. A test macro swaps libusb for the fake (`RNDIS_TESTING`). Still to do: DHCP NAK and renewal, NDP, and a phone that misbehaves on purpose (truncated, oversized or out-of-order messages, vanishing mid-session).
