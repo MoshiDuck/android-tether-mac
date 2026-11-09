@@ -125,7 +125,9 @@ static pthread_mutex_t tx_lock = PTHREAD_MUTEX_INITIALIZER;
 #ifdef RNDIS_TESTING
 /* Compilé avec -DRNDIS_TESTING (tests uniquement) : les commandes système sont enregistrées, pas exécutées. */
 void test_record_command(const char *cmd);
-extern int __llvm_profile_write_file(void) __attribute__((weak));   /* présent seulement dans les builds de couverture */
+#ifdef COVERAGE_BUILD
+extern int __llvm_profile_write_file(void);                          /* runtime de couverture de clang */
+#endif
 static int (*test_worker_entry)(int sock);   /* si défini, le worker forké exécute cette fonction au lieu de worker_main */
 
 /* Téléphone simulé : quand test_fake_usb est vrai, les échanges USB vont aux fonctions fake_usb_* des tests au lieu de
@@ -1474,7 +1476,9 @@ static int run_worker_once(unsigned vid, unsigned pid, uid_t uid, gid_t gid) {
 #ifdef RNDIS_TESTING
         if (test_worker_entry) {                                      /* faux worker des tests */
             int code = test_worker_entry(sv[1]);
-            if (__llvm_profile_write_file) __llvm_profile_write_file();   /* _exit() n'écrit pas le profil de couverture */
+#ifdef COVERAGE_BUILD
+            __llvm_profile_write_file();                              /* _exit() n'écrit pas le profil de couverture */
+#endif
             _exit(code);
         }
 #endif

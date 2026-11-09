@@ -16,7 +16,7 @@ STRICT_FLAGS = -O2 -Wall -Wextra -Wshadow -Wformat=2 -Wstrict-prototypes -Wpoint
 TEST_FLAGS = -g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined -fno-sanitize-recover=undefined -DRNDIS_TESTING
 
 # Couverture de code (LLVM source-based coverage)
-COV_FLAGS = -g -O0 -fprofile-instr-generate -fcoverage-mapping -DRNDIS_TESTING
+COV_FLAGS = -g -O0 -fprofile-instr-generate -fcoverage-mapping -DRNDIS_TESTING -DCOVERAGE_BUILD
 LLVM_COV      = $(shell xcrun --find llvm-cov 2>/dev/null || command -v llvm-cov)
 LLVM_PROFDATA = $(shell xcrun --find llvm-profdata 2>/dev/null || command -v llvm-profdata)
 
