@@ -73,7 +73,7 @@ jobs:
       - name: Coverage report and thresholds
         run: |
           make coverage | tee coverage.txt
-          scripts/check-coverage.sh coverage.txt dhcp.c=95 policy.c=95 ipc.c=95 diagnose.c=95 logsan.c=95 adb.c=95 TOTAL=50
+          scripts/check-coverage.sh coverage.txt dhcp.c=95 policy.c=95 ipc.c=95 diagnose.c=95 logsan.c=95 adb.c=95 main.c=60 TOTAL=72
 
       - name: Upload coverage report
         if: always()
