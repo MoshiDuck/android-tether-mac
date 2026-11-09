@@ -6,7 +6,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 ## [Unreleased]
 
 ### Changed
-- Coverage now includes the forked test workers (they write their profile before exiting): `main.c` reads about 69 % of lines instead of 51 %, total 79 % instead of 67 %. The CI thresholds rise to `main.c` 60 % and total 72 %.
+- Coverage now includes the forked test workers (they write their profile before exiting): every forked test child writes its profile before it exits, so `main.c` reads about 71 % of lines instead of 51 %, total 80 % instead of 67 %. The CI thresholds rise to `main.c` 65 % and total 75 %.
 
 ## [0.4.1] - 2026-11-08
 

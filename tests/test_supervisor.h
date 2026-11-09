@@ -395,10 +395,10 @@ static void test_worker_limits(void) {
     pid_t p = fork();                                    /* dans un processus à part : on abaisse de vraies limites */
     if (p == 0) {
         struct rlimit rl;
-        if (worker_limits() < 0) _exit(1);
-        if (getrlimit(RLIMIT_CORE, &rl) || rl.rlim_cur != 0 || rl.rlim_max != 0) _exit(2);
-        if (getrlimit(RLIMIT_NOFILE, &rl) || rl.rlim_cur != WORKER_MAX_FDS || rl.rlim_max != WORKER_MAX_FDS) _exit(3);
-        _exit(0);
+        if (worker_limits() < 0) test_child_exit(1);
+        if (getrlimit(RLIMIT_CORE, &rl) || rl.rlim_cur != 0 || rl.rlim_max != 0) test_child_exit(2);
+        if (getrlimit(RLIMIT_NOFILE, &rl) || rl.rlim_cur != WORKER_MAX_FDS || rl.rlim_max != WORKER_MAX_FDS) test_child_exit(3);
+        test_child_exit(0);
     }
     CHECK(child_exit(p) == 0);
 
@@ -406,10 +406,10 @@ static void test_worker_limits(void) {
     if (p == 0) {
         struct rlimit before, rl;
         getrlimit(RLIMIT_NOFILE, &before);
-        if (disable_core_dumps() < 0) _exit(1);
-        if (getrlimit(RLIMIT_CORE, &rl) || rl.rlim_cur != 0 || rl.rlim_max != 0) _exit(2);
-        if (getrlimit(RLIMIT_NOFILE, &rl) || rl.rlim_cur != before.rlim_cur) _exit(3);
-        _exit(0);
+        if (disable_core_dumps() < 0) test_child_exit(1);
+        if (getrlimit(RLIMIT_CORE, &rl) || rl.rlim_cur != 0 || rl.rlim_max != 0) test_child_exit(2);
+        if (getrlimit(RLIMIT_NOFILE, &rl) || rl.rlim_cur != before.rlim_cur) test_child_exit(3);
+        test_child_exit(0);
     }
     CHECK(child_exit(p) == 0);
 }
@@ -581,23 +581,23 @@ static void test_log_rotation(void) {
         int fd = open(p, O_WRONLY | O_APPEND | O_CREAT, 0644);
         dup2(fd, STDERR_FILENO); dup2(fd, STDOUT_FILENO); close(fd);
         log_track(p);
-        if (!log_tracked) _exit(1);
-        if (log_reopen_if_rotated(p) != 0) _exit(2);                                /* fichier inchangé : rien à faire */
+        if (!log_tracked) test_child_exit(1);
+        if (log_reopen_if_rotated(p) != 0) test_child_exit(2);                                /* fichier inchangé : rien à faire */
         (void)!write(STDERR_FILENO, "avant\n", 6);
         rename(p, p0);                                                              /* newsyslog renomme le journal */
-        if (log_reopen_if_rotated(p) != 1) _exit(3);
+        if (log_reopen_if_rotated(p) != 1) test_child_exit(3);
         (void)!write(STDERR_FILENO, "apres\n", 6);
         (void)!write(STDOUT_FILENO, "sortie\n", 7);                                 /* stdout suit stderr */
-        if (log_reopen_if_rotated(p) != 0) _exit(4);                                /* une seule réouverture */
+        if (log_reopen_if_rotated(p) != 0) test_child_exit(4);                                /* une seule réouverture */
         unlink(p);                                                                  /* journal supprimé : recréé */
-        if (log_reopen_if_rotated(p) != 1) _exit(5);
+        if (log_reopen_if_rotated(p) != 1) test_child_exit(5);
         (void)!write(STDERR_FILENO, "recree\n", 7);
         rename(p, p1);                                                              /* cas courant : newsyslog crée tout de suite un nouveau fichier */
         int nf = open(p, O_WRONLY | O_CREAT | O_EXCL, 0644); close(nf);
-        if (log_reopen_if_rotated(p) != 1) _exit(6);                                /* même chemin, autre fichier : on le suit */
+        if (log_reopen_if_rotated(p) != 1) test_child_exit(6);                                /* même chemin, autre fichier : on le suit */
         (void)!write(STDERR_FILENO, "neuf\n", 5);
-        if (log_reopen_if_rotated(p) != 0) _exit(7);
-        _exit(0);
+        if (log_reopen_if_rotated(p) != 0) test_child_exit(7);
+        test_child_exit(0);
     }
     CHECK(child_exit(pid) == 0);
     CHECK(file_has(p0, "avant") && !file_has(p0, "apres"));
@@ -612,17 +612,17 @@ static void test_log_rotation(void) {
         int fd = open(other, O_WRONLY | O_CREAT, 0644);
         dup2(fd, STDERR_FILENO); close(fd);
         log_track(p);                                                               /* le chemin du journal n'existe pas : pas de suivi */
-        if (log_tracked) _exit(1);
-        if (log_reopen_if_rotated(p) != 0) _exit(2);
-        if (access(p, F_OK) == 0) _exit(3);                                         /* et rien n'a été créé */
+        if (log_tracked) test_child_exit(1);
+        if (log_reopen_if_rotated(p) != 0) test_child_exit(2);
+        if (access(p, F_OK) == 0) test_child_exit(3);                                         /* et rien n'a été créé */
         fd = open(p, O_WRONLY | O_CREAT, 0644); close(fd);                          /* un autre fichier existe, mais stderr n'est pas lui */
         log_track(p);
-        if (log_tracked) _exit(4);
+        if (log_tracked) test_child_exit(4);
         int nul = open("/dev/null", O_WRONLY);                                      /* ni un terminal, ni un tube, ni /dev/null */
         dup2(nul, STDERR_FILENO); close(nul);
         log_track(p);
-        if (log_tracked || log_reopen_if_rotated(p) != 0) _exit(5);
-        _exit(0);
+        if (log_tracked || log_reopen_if_rotated(p) != 0) test_child_exit(5);
+        test_child_exit(0);
     }
     CHECK(child_exit(pid) == 0);
 
@@ -634,7 +634,7 @@ static void test_log_rotation(void) {
         unlink(p);
         char bad[300];
         snprintf(bad, sizeof bad, "%s/absent/rndis-tether.log", dir);
-        _exit(log_reopen_if_rotated(bad) == -1 ? 0 : 1);
+        test_child_exit(log_reopen_if_rotated(bad) == -1 ? 0 : 1);
     }
     CHECK(child_exit(pid) == 0);
 
