@@ -55,7 +55,7 @@ Critères de sortie : `--diagnose` cité dans les modèles de tickets (fait) ; l
 
 ## 0.5.0 — Tests d'intégration sans matériel
 
-Aujourd'hui `main.c` est couvert à environ 77 % de ses lignes (les workers de test forkés écrivent désormais aussi leur profil de couverture ; on lisait 44 %, parce que toute la session tournait dans un processus qui sortait sans l'écrire) ; la partie non testée est justement la boucle USB et de session que les vrais téléphones sollicitent.
+Aujourd'hui `main.c` est couvert à environ 78 % de ses lignes (les workers de test forkés écrivent désormais aussi leur profil de couverture ; on lisait 44 %, parce que toute la session tournait dans un processus qui sortait sans l'écrire) ; la partie non testée est justement la boucle USB et de session que les vrais téléphones sollicitent.
 
 - ⬜ **Couche d'abstraction USB** — placer libusb derrière une petite interface (`usb_ops`) pour que le code de session tourne face à un **faux appareil**.
 - 🟡 **Faux téléphone RNDIS** — ✅ première version (`tests/test_session.h`) : la vraie session du worker tourne dans un processus forké face à un faux téléphone qui parle la négociation RNDIS, répond au DHCP (avec un MTU), répond à la sollicitation de routeur avec un préfixe et un MTU, et répond à un ping ; le vrai superviseur le sert dans le processus de test, avec `ifconfig`/`route`/`scutil` enregistrés. On vérifie ce qui serait configuré, qu'un ping traverse tout le chemin, et que tout est nettoyé, sans téléphone ni root. Une macro de test remplace libusb par le faux (`RNDIS_TESTING`). Reste : NAK et renouvellement DHCP, NDP, et un téléphone qui se comporte mal exprès (messages tronqués, trop gros, dans le désordre, disparition en cours de session).
