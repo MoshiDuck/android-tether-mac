@@ -225,7 +225,90 @@ static void test_diag_usb(void) {
     CHECK(f.usb_native && !f.usb_rndis);
 }
 
+/* worker_run sans périphérique et sans -w : il le dit et sort avec le code « aucun appareil ». */
+static void test_worker_run_no_device(void) {
+    char path[] = "/tmp/wr_nodev_XXXXXX";
+    int fdlog = mkstemp(path);
+    int saved = dup(STDERR_FILENO);
+    fd_reset();
+    worker_mode = 1; wait_mode = 0; auto_adb = 0;
+    fflush(stderr);
+    dup2(fdlog, STDERR_FILENO);
+    test_fake_enum = 1;
+    int rc = worker_run(0, 0);
+    test_fake_enum = 0;
+    fflush(stderr);
+    dup2(saved, STDERR_FILENO); close(saved);
+    char *log = slurp(path);
+    close(fdlog); unlink(path);
+    worker_mode = 0;
+    CHECK(rc == EXIT_NO_DEVICE);
+    CHECK(log && strstr(log, "Aucun appareil RNDIS") != NULL);
+    free(log);
+}
+
+/* Le worker entier : énumération simulée (find_device) puis la session, sur le faux téléphone. */
+static int fake_worker_run_entry(int sock) {
+    worker_mode = 1;
+    ipc_sock = sock;
+    test_fake_usb = 1; test_fake_enum = 1;
+    wait_mode = 0; auto_adb = 0;
+    fd_reset(); fd_phone(0x04e8, 0x6864, 512);
+    ph.t0 = now_s();
+    return worker_run(0, 0);
+}
+
+/* Signal d'arrêt pendant la session : le worker sort avec le code 0, pas avec un échec. */
+static void *quit_later(void *a) {
+    (void)a;
+    usleep(1500000);
+    running = 0; quit = 1;
+    return NULL;
+}
+
+static int fake_worker_quit_entry(int sock) {
+    pthread_t t;
+    pthread_create(&t, NULL, quit_later, NULL);
+    pthread_detach(t);
+    return fake_worker_run_entry(sock);
+}
+
+static void test_worker_run_quit(void) {
+    sup_reset();
+    ph.qn = 0; ph.resp_len = 0; ph.echoes = 0; ph.echo_at = 0;
+    test_worker_entry = fake_worker_quit_entry;
+    int rc;
+    char *log = run_capturing_stderr(&rc);
+    test_worker_entry = NULL;
+    CHECK(rc == 0);
+    CHECK(strstr(log, "Tethering actif") != NULL);
+    free(log);
+    test_fake_usb = 0;
+    if (test_utun_peer >= 0) { close(test_utun_peer); test_utun_peer = -1; }
+    sup_reset();
+}
+
+static void test_worker_run_session(void) {
+    sup_reset();
+    ph.qn = 0; ph.resp_len = 0; ph.echoes = 0; ph.echo_at = 0;
+    test_worker_entry = fake_worker_run_entry;
+    int rc;
+    char *log = run_capturing_stderr(&rc);
+    test_worker_entry = NULL;
+    CHECK(rc == 0);
+    CHECK(strstr(log, "Appareil RNDIS trouvé: 04e8:6864") != NULL);
+    CHECK(strstr(log, "Tethering actif") != NULL);
+    CHECK(cmd_has("/sbin/ifconfig utun99 inet 10.217.123.154"));
+    free(log);
+    test_fake_usb = 0;
+    if (test_utun_peer >= 0) { close(test_utun_peer); test_utun_peer = -1; }
+    sup_reset();
+}
+
 static void run_enum_tests(void) {
+    test_worker_run_no_device();
+    test_worker_run_session();
+    test_worker_run_quit();
     test_find_device();
     test_diag_usb();
 }
