@@ -165,6 +165,8 @@ int fake_enum_open(libusb_device *dev, libusb_device_handle **hd);
 #define libusb_free_config_descriptor(cfg) do { if (!test_fake_enum) libusb_free_config_descriptor(cfg); } while (0)
 #define libusb_free_device_list(l, u) do { if (!test_fake_enum) libusb_free_device_list(l, u); } while (0)
 #define libusb_open(d, hd) (test_fake_enum ? fake_enum_open(d, hd) : libusb_open(d, hd))
+#define libusb_init(c) (test_fake_enum ? 0 : libusb_init(c))      /* le vrai libusb_init() plante dans un fils de fork() (CoreFoundation) */
+#define libusb_exit(c) do { if (!test_fake_enum) libusb_exit(c); } while (0)
 #endif
 
 PRINTF_LIKE(1, 2) static void logf_(const char *fmt, ...) {
