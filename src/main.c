@@ -152,6 +152,19 @@ int fake_usb_interrupt(libusb_device_handle *hd, unsigned char ep, unsigned char
 #define libusb_claim_interface(hd, i) (test_fake_usb ? 0 : libusb_claim_interface(hd, i))
 #define libusb_release_interface(hd, i) (test_fake_usb ? 0 : libusb_release_interface(hd, i))
 #define libusb_close(hd) do { if (!test_fake_usb) libusb_close(hd); } while (0)
+
+/* Liste de périphériques simulée (test_fake_enum) : find_device() et diag_usb() lisent des descripteurs fabriqués par les tests. */
+static int test_fake_enum;
+ssize_t fake_enum_list(libusb_device ***list);
+int fake_enum_dev_desc(libusb_device *dev, struct libusb_device_descriptor *dd);
+int fake_enum_cfg(libusb_device *dev, struct libusb_config_descriptor **cfg);
+int fake_enum_open(libusb_device *dev, libusb_device_handle **hd);
+#define libusb_get_device_list(c, l) (test_fake_enum ? fake_enum_list(l) : libusb_get_device_list(c, l))
+#define libusb_get_device_descriptor(d, dd) (test_fake_enum ? fake_enum_dev_desc(d, dd) : libusb_get_device_descriptor(d, dd))
+#define libusb_get_active_config_descriptor(d, cfg) (test_fake_enum ? fake_enum_cfg(d, cfg) : libusb_get_active_config_descriptor(d, cfg))
+#define libusb_free_config_descriptor(cfg) do { if (!test_fake_enum) libusb_free_config_descriptor(cfg); } while (0)
+#define libusb_free_device_list(l, u) do { if (!test_fake_enum) libusb_free_device_list(l, u); } while (0)
+#define libusb_open(d, hd) (test_fake_enum ? fake_enum_open(d, hd) : libusb_open(d, hd))
 #endif
 
 PRINTF_LIKE(1, 2) static void logf_(const char *fmt, ...) {

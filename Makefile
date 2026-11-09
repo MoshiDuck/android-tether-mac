@@ -35,13 +35,13 @@ analyze: $(SRC) $(HDR)
 	  if [ -n "$$out" ]; then echo "$$out"; exit 1; fi; \
 	done
 
-tests/test_main: $(TEST_SRC) src/main.c $(HDR) tests/check.h tests/test_supervisor.h tests/test_session.h
+tests/test_main: $(TEST_SRC) src/main.c $(HDR) tests/check.h tests/test_supervisor.h tests/test_session.h tests/test_enum.h
 	$(CC) $(CFLAGS) $(TEST_FLAGS) -o $@ $(TEST_SRC) $(LDLIBS)
 
 test: tests/test_main
 	./tests/test_main
 
-tests/test_cov: $(TEST_SRC) src/main.c $(HDR) tests/check.h tests/test_supervisor.h tests/test_session.h
+tests/test_cov: $(TEST_SRC) src/main.c $(HDR) tests/check.h tests/test_supervisor.h tests/test_session.h tests/test_enum.h
 	$(CC) $(CFLAGS) $(COV_FLAGS) -o $@ $(TEST_SRC) $(LDLIBS)
 
 # Rapport de couverture ; scripts/check-coverage.sh vérifie les seuils des modules purs
@@ -57,7 +57,7 @@ clean:
 
 # Détection de courses de données entre threads (ThreadSanitizer) : mêmes tests, y compris la session complète.
 # die_after_fork=0 : les workers de test sont des fork() d'un processus qui a déjà des threads.
-tests/test_tsan: $(TEST_SRC) src/main.c $(HDR) tests/check.h tests/test_supervisor.h tests/test_session.h
+tests/test_tsan: $(TEST_SRC) src/main.c $(HDR) tests/check.h tests/test_supervisor.h tests/test_session.h tests/test_enum.h
 	$(CC) $(CFLAGS) -g -O1 -fno-omit-frame-pointer -fsanitize=thread -DRNDIS_TESTING -o $@ $(TEST_SRC) $(LDLIBS)
 
 tsan: tests/test_tsan
