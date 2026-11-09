@@ -5,6 +5,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-08
+
 ### Added
 - **IPv6 DNS server of the phone (RDNSS).** When the router advertisement carries an RDNSS option (lifetime above zero), the first address is validated by the supervisor (global or unique-local only: never link-local, loopback, multicast, unspecified or our own address) and published after the IPv4 DNS server in the resolver (`ServerAddresses`). It is removed together with the IPv6 (the resolver is republished with the IPv4 server only). The server is taken from the advertisement that installs the IPv6; a later change of the RDNSS is not followed. The `CONFIG6` request grows from 32/34 to 50 bytes with the optional server. Not validated on a real phone yet.
 - `make tsan` runs all the tests, including the whole-session test, under ThreadSanitizer; it is a CI step. It currently reports no race.
@@ -103,7 +105,8 @@ First public release.
 - Homebrew tap (`brew install MoshiDuck/tap/android-tether-mac`).
 - Tested on a Samsung Galaxy S24 Ultra (SM-S928B, Android 16, One UI 8).
 
-[Unreleased]: https://github.com/MoshiDuck/android-tether-mac/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/MoshiDuck/android-tether-mac/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/MoshiDuck/android-tether-mac/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/MoshiDuck/android-tether-mac/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/MoshiDuck/android-tether-mac/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/MoshiDuck/android-tether-mac/compare/v0.1.1...v0.2.0
