@@ -6,6 +6,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 ## [Unreleased]
 
 ### Added
+- Tests of the whole worker (`worker_run`): no device without `-w`, the full path from the simulated USB enumeration to a running session, and a stop request during a session (the worker leaves with code 0). They also showed, in the test setup, the same CoreFoundation-after-`fork()` failure that the 0.4.1 `exec()` fix addresses in production. `main.c` reads about 78 % of lines.
 - Tests of the USB enumeration against fake devices (`tests/test_enum.h`): `find_device` (the normal phone, `-d` filtering, open failure, unreadable configuration, missing data interface, a vendor interface that is not the data interface, CDC-ECM message once) and the `--diagnose` USB section. `main.c` reads about 77 % of lines, total 84 %; CI thresholds rise to `main.c` 70 % and total 80 %.
 
 ### Changed
