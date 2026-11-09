@@ -433,6 +433,33 @@ static void put_prefix_opt(uint8_t *o, uint8_t plen, uint8_t flags, uint32_t val
     memcpy(o + 16, (uint8_t[]){0x26, 0, 0x03, 0x83, 0x0a, 0x44, 0x4d, 0x02}, 8);
 }
 
+/* Quelles interfaces USB sont prises pour le contrôle RNDIS : trois signatures connues, rien d'autre. */
+static void test_is_rndis_ctrl(void) {
+    struct libusb_interface_descriptor d;
+    memset(&d, 0, sizeof d);
+    d.bInterfaceClass = 0xE0; d.bInterfaceSubClass = 1; d.bInterfaceProtocol = 3;     /* Wireless Controller / RNDIS */
+    CHECK(is_rndis_ctrl(&d));
+    d.bInterfaceClass = 0xEF; d.bInterfaceSubClass = 4; d.bInterfaceProtocol = 1;     /* Miscellaneous / RNDIS sur Ethernet */
+    CHECK(is_rndis_ctrl(&d));
+    d.bInterfaceClass = 2; d.bInterfaceSubClass = 2; d.bInterfaceProtocol = 0xFF;     /* CDC ACM avec protocole propriétaire */
+    CHECK(is_rndis_ctrl(&d));
+
+    d.bInterfaceClass = 0xE0; d.bInterfaceSubClass = 1; d.bInterfaceProtocol = 2;     /* protocole voisin : refusé */
+    CHECK(!is_rndis_ctrl(&d));
+    d.bInterfaceClass = 0xE0; d.bInterfaceSubClass = 2; d.bInterfaceProtocol = 3;
+    CHECK(!is_rndis_ctrl(&d));
+    d.bInterfaceClass = 0xEF; d.bInterfaceSubClass = 4; d.bInterfaceProtocol = 0;
+    CHECK(!is_rndis_ctrl(&d));
+    d.bInterfaceClass = 2; d.bInterfaceSubClass = 6; d.bInterfaceProtocol = 0;        /* CDC ECM : géré par macOS, pas par nous */
+    CHECK(!is_rndis_ctrl(&d));
+    d.bInterfaceClass = 3; d.bInterfaceSubClass = 1; d.bInterfaceProtocol = 1;        /* clavier */
+    CHECK(!is_rndis_ctrl(&d));
+    memset(&d, 0, sizeof d);
+    CHECK(!is_rndis_ctrl(&d));
+    memset(&d, 0xFF, sizeof d);
+    CHECK(!is_rndis_ctrl(&d));
+}
+
 static void test_parse_ra(void) {
     uint8_t f[300], opts[64];
     struct ra r;
@@ -863,6 +890,7 @@ int main(void) {
     test_icmp6_csum();
     test_build_na();
     test_build_rs();
+    test_is_rndis_ctrl();
     test_parse_ra();
     test_handle_ipv6();
     test_ra_lifecycle();
