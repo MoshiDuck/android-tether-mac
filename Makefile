@@ -16,7 +16,7 @@ STRICT_FLAGS = -O2 -Wall -Wextra -Wshadow -Wformat=2 -Wstrict-prototypes -Wpoint
 TEST_FLAGS = -g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined -fno-sanitize-recover=undefined -DRNDIS_TESTING
 
 # Couverture de code (LLVM source-based coverage)
-COV_FLAGS = -g -O0 -fprofile-instr-generate -fcoverage-mapping -DRNDIS_TESTING
+COV_FLAGS = -g -O0 -fprofile-instr-generate -fcoverage-mapping -DRNDIS_TESTING -DCOVERAGE_BUILD
 LLVM_COV      = $(shell xcrun --find llvm-cov 2>/dev/null || command -v llvm-cov)
 LLVM_PROFDATA = $(shell xcrun --find llvm-profdata 2>/dev/null || command -v llvm-profdata)
 
@@ -46,13 +46,13 @@ tests/test_cov: $(TEST_SRC) src/main.c $(HDR) tests/check.h tests/test_superviso
 
 # Rapport de couverture ; scripts/check-coverage.sh vérifie les seuils des modules purs
 coverage: tests/test_cov
-	rm -f tests/cov.profraw
-	LLVM_PROFILE_FILE=tests/cov.profraw ./tests/test_cov
-	$(LLVM_PROFDATA) merge -sparse tests/cov.profraw -o tests/cov.profdata
+	rm -f tests/cov*.profraw
+	LLVM_PROFILE_FILE=tests/cov-%p.profraw ./tests/test_cov
+	$(LLVM_PROFDATA) merge -sparse tests/cov-*.profraw -o tests/cov.profdata
 	$(LLVM_COV) report ./tests/test_cov -instr-profile=tests/cov.profdata $(SRC)
 
 clean:
-	rm -f rndis-tether tests/test_main tests/test_tsan tests/test_cov tests/cov.profraw tests/cov.profdata
+	rm -f rndis-tether tests/test_main tests/test_tsan tests/test_cov tests/cov*.profraw tests/cov.profdata
 	rm -rf tests/test_main.dSYM tests/test_tsan.dSYM tests/test_cov.dSYM
 
 # Détection de courses de données entre threads (ThreadSanitizer) : mêmes tests, y compris la session complète.
