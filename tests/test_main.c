@@ -464,6 +464,27 @@ static void test_parse_ra(void) {
     put_prefix_opt(opts, 48, 0xC0, 0);                                     /* retrait d'un préfixe qui n'est pas un /64 : ignoré */
     n = make_ra(f, opts, 32);
     CHECK(parse_ra(f, n, &r) == 0 && !r.gone);
+    {   /* RDNSS (option 25) : première adresse retenue si la durée n'est pas nulle */
+        uint8_t rd[64];
+        memset(rd, 0, sizeof rd);
+        rd[0] = 25; rd[1] = 3; putbe32(rd + 4, 600);
+        memcpy(rd + 8, (uint8_t[]){0x20, 0x01, 0x48, 0x60, 0x48, 0x60, 0, 0, 0, 0, 0, 0, 0, 0, 0x88, 0x88}, 16);
+        n = make_ra(f, rd, 24);
+        CHECK(parse_ra(f, n, &r) == 0 && r.have_dns6 && r.dns6[0] == 0x20 && r.dns6[15] == 0x88);
+        putbe32(rd + 4, 0);                                                /* durée nulle : à ne pas utiliser */
+        n = make_ra(f, rd, 24);
+        CHECK(parse_ra(f, n, &r) == 0 && !r.have_dns6);
+        putbe32(rd + 4, 600); rd[1] = 2;                                   /* option trop courte : pas d'adresse */
+        n = make_ra(f, rd, 16);
+        CHECK(parse_ra(f, n, &r) == 0 && !r.have_dns6);
+        rd[1] = 5; putbe32(rd + 4, 600);                                   /* deux adresses : la première seulement */
+        memcpy(rd + 24, (uint8_t[]){0x20, 0x01, 0x48, 0x60, 0x48, 0x60, 0, 0, 0, 0, 0, 0, 0, 0, 0x88, 0x44}, 16);
+        n = make_ra(f, rd, 40);
+        CHECK(parse_ra(f, n, &r) == 0 && r.have_dns6 && r.dns6[15] == 0x88);
+        rd[1] = 9;                                                         /* longueur annoncée au-delà de la trame : ignorée */
+        n = make_ra(f, rd, 40);
+        CHECK(parse_ra(f, n, &r) == 0 && !r.have_dns6);
+    }
     put_prefix_opt(opts, 64, 0xC0, 3600);                                  /* un préfixe valable et un retrait dans la même RA */
     put_prefix_opt(opts + 32, 64, 0xC0, 0); opts[32 + 16] = 0x20; opts[32 + 17] = 0x01;
     n = make_ra(f, opts, 64);

@@ -74,6 +74,8 @@
 static int cur_mtu = MTU;               /* worker : MTU de l'interface (celui du téléphone s'il en annonce un plus petit) */
 static int iface_mtu = MTU;             /* superviseur : MTU appliqué à l'interface */
 static unsigned v6_mtu;                 /* worker : MTU annoncé dans la RA (0 si absent) */
+static uint8_t v6_dns[16];              /* worker : serveur DNS IPv6 annoncé (RDNSS) */
+static int v6_has_dns;
 
 #define CDC_SEND_ENCAPSULATED   0x00
 #define CDC_GET_ENCAPSULATED    0x01
@@ -225,10 +227,11 @@ static int request_config4(const struct lease *L) {
 }
 
 static void request_config6(void) {
-    uint8_t d[34];
+    uint8_t d[50];
     memcpy(d, v6_addr, 16); memcpy(d + 16, v6_router, 16);
     putbe16(d + 32, (uint16_t)v6_mtu);
-    int r = ipc_call(IPC_REQ_CONFIG6, d, v6_mtu ? 34 : 32, NULL, NULL, 30000);
+    if (v6_has_dns) memcpy(d + 34, v6_dns, 16);
+    int r = ipc_call(IPC_REQ_CONFIG6, d, v6_has_dns ? 50 : v6_mtu ? 34 : 32, NULL, NULL, 30000);
     if (r > 0) { LOG("IPv6: configuration refusée par le superviseur"); return; }
     if (r == 0 && v6_mtu && (int)v6_mtu < __atomic_load_n(&cur_mtu, __ATOMIC_RELAXED)) {
         __atomic_store_n(&cur_mtu, (int)v6_mtu, __ATOMIC_RELAXED);
@@ -553,18 +556,27 @@ static void scutil_run(const char *script) {
 
 /* Déclare l'interface comme service réseau (comme un client VPN) pour que macOS
  * puisse l'élire service principal quand il n'y a plus de Wi-Fi, avec son DNS. */
-static void dns_apply(const struct lease *L) {
-    char d[INET_ADDRSTRLEN], ip[INET_ADDRSTRLEN], gw[INET_ADDRSTRLEN], s[768];
-    ipstr(L->dns, d); ipstr(L->ip, ip); ipstr(L->gw, gw);
+static uint32_t dns4_ip;                /* superviseur : DNS IPv4 du bail */
+static char dns6_str[INET6_ADDRSTRLEN]; /* superviseur : DNS IPv6 annoncé (RDNSS), vide si aucun */
+
+/* Publie le service et le résolveur ; le DNS IPv6, s'il y en a un, vient après celui du bail. */
+static void dns_publish(void) {
+    char d[INET_ADDRSTRLEN], ip[INET_ADDRSTRLEN], gw[INET_ADDRSTRLEN], s[896];
+    ipstr(dns4_ip, d); ipstr(my_ip, ip); ipstr(gw_ip, gw);
     snprintf(s, sizeof s,
              "d.init\nd.add Addresses * %s\nd.add DestAddresses * %s\nd.add InterfaceName %s\nd.add Router %s\n"
              "set State:/Network/Service/rndis-tether/IPv4\n"
-             "d.init\nd.add ServerAddresses * %s\nd.add SupplementalMatchDomains * \"\"\nd.add InterfaceName %s\n"
+             "d.init\nd.add ServerAddresses * %s%s%s\nd.add SupplementalMatchDomains * \"\"\nd.add InterfaceName %s\n"
              "set State:/Network/Service/rndis-tether/DNS\n",
-             ip, gw, utun_name, gw, d, utun_name);
-    VLOG("DNS -> %s", d);
+             ip, gw, utun_name, gw, d, dns6_str[0] ? " " : "", dns6_str, utun_name);
+    VLOG("DNS -> %s%s%s", d, dns6_str[0] ? " " : "", dns6_str);
     scutil_run(s);
     dns_applied = 1;
+}
+
+static void dns_apply(const struct lease *L) {
+    dns4_ip = L->dns;
+    dns_publish();
 }
 
 static void configure_iface(const struct lease *L) {
@@ -624,7 +636,8 @@ static int build_na(uint8_t *out, const uint8_t *f, int len) {
 
 struct ra { int have_prefix; uint8_t prefix[16]; uint8_t plen; uint16_t router_lifetime; uint8_t router[16];
             int gone; uint8_t gone_prefix[8]; uint16_t mtu;
-            int nprefixes; uint8_t prefixes[4][8]; };   /* tous les /64 utilisables annoncés (au plus 4) */      /* gone : un /64 auto-configurable annoncé avec une durée de validité nulle */
+            int nprefixes; uint8_t prefixes[4][8];
+            int have_dns6; uint8_t dns6[16]; };          /* premier serveur DNS IPv6 annoncé (RDNSS, option 25) */   /* tous les /64 utilisables annoncés (au plus 4) */      /* gone : un /64 auto-configurable annoncé avec une durée de validité nulle */
 
 /* Analyse une annonce de routeur (RA). Tout vient du réseau : bornes vérifiées à chaque option.
  * Retourne 0 si c'est une RA valide (have_prefix indique si un préfixe /64 auto-configurable y figure). */
@@ -647,6 +660,10 @@ static int parse_ra(const uint8_t *f, int len, struct ra *r) {
         if (o[0] == 5 && l >= 8 && !r->mtu) {                        /* option MTU */
             uint32_t m = be32(o + 4);
             r->mtu = m > 0xffff ? 0xffff : (uint16_t)m;
+        }
+        if (o[0] == 25 && l >= 24 && !r->have_dns6 && be32(o + 4) > 0) {   /* RDNSS : durée > 0, au moins une adresse */
+            memcpy(r->dns6, o + 8, 16);
+            r->have_dns6 = 1;
         }
         if (o[0] == 3 && l >= 32) {                                  /* Prefix Information */
             const uint8_t *p = o + 16;
@@ -746,6 +763,7 @@ static void deconfigure_ipv6(void) {
     teardown_ipv6_routes();
     sh("/sbin/ifconfig %s inet6 %s -alias", utun_name, a);
     cfg6_done = 0;
+    if (dns6_str[0]) { dns6_str[0] = '\0'; if (dns_applied) dns_publish(); }      /* le DNS IPv6 disparaît avec l'IPv6 */
     block_ipv6();
     LOG("IPv6: retiré (le téléphone n'en fournit plus)");
 }
@@ -793,6 +811,8 @@ static void ra_apply(const struct ra *r, int64_t now) {
         __atomic_store_n(&v6_withdraw, 0, __ATOMIC_RELAXED);
         memcpy(v6_router, r->router, 16);
         v6_mtu = policy_mtu_from_peer(r->mtu, POLICY_MTU_MIN6);
+        v6_has_dns = r->have_dns6;
+        if (v6_has_dns) memcpy(v6_dns, r->dns6, 16);
         if (v6_mtu >= MTU) v6_mtu = 0;                                   /* 1500 ou plus : rien à changer */
         memcpy(v6_addr, r->prefix, 8);
         do { arc4random_buf(v6_addr + 8, 8); v6_addr[8] &= ~0x02; }     /* identifiant aléatoire, non EUI-64 */
@@ -1225,16 +1245,21 @@ static void handle_request(int sock, const struct ipc_msg *rq) {
         break;
     }
     case IPC_REQ_CONFIG6: {
-        if (!ipv6_on || utun_fd < 0 || !cfg4_done || cfg6_done || (rq->len != 32 && rq->len != 34)) { rp.status = 200; break; }
+        if (!ipv6_on || utun_fd < 0 || !cfg4_done || cfg6_done || (rq->len != 32 && rq->len != 34 && rq->len != 50)) { rp.status = 200; break; }
         int e = policy_check_v6(rq->data, rq->data + 16);
         if (e) { LOG("Configuration IPv6 refusée : %s", policy_strerror(e)); rp.status = (uint8_t)e; break; }
-        unsigned mtu6 = rq->len == 34 ? (unsigned)(rq->data[32] << 8 | rq->data[33]) : 0;
+        unsigned mtu6 = rq->len >= 34 ? (unsigned)(rq->data[32] << 8 | rq->data[33]) : 0;
+        if (rq->len == 50 && (e = policy_check_dns6(rq->data + 34, rq->data)) != POLICY_OK) { LOG("Configuration IPv6 refusée : %s", policy_strerror(e)); rp.status = (uint8_t)e; break; }
         if (mtu6 && (e = policy_check_mtu(mtu6, 1)) != POLICY_OK) { LOG("Configuration IPv6 refusée : %s", policy_strerror(e)); rp.status = (uint8_t)e; break; }
         memcpy(v6_addr, rq->data, 16);
         memcpy(v6_router, rq->data + 16, 16);
         unblock_ipv6();                                              /* les vraies routes remplacent les routes « reject » */
         configure_ipv6();
         cfg6_done = 1;
+        if (rq->len == 50 && want_route && dns_applied) {            /* DNS IPv6 du téléphone, après celui d'IPv4 */
+            inet_ntop(AF_INET6, rq->data + 34, dns6_str, sizeof dns6_str);
+            dns_publish();
+        }
         if (mtu6 && (int)mtu6 < iface_mtu) {                         /* un seul MTU pour l'interface : le plus petit des deux */
             sh("/sbin/ifconfig %s mtu %u", utun_name, mtu6);
             iface_mtu = (int)mtu6;
@@ -1474,7 +1499,7 @@ static int run_worker_once(unsigned vid, unsigned pid, uid_t uid, gid_t gid) {
         close(lp[1]);
         if (pthread_create(&pump.th, NULL, log_pump_thread, &pump) != 0) { pumping = 0; close(lp[0]); }
     }
-    utun_fd = -1; cfg4_done = cfg6_done = 0; my_ip = gw_ip = 0;
+    utun_fd = -1; cfg4_done = cfg6_done = 0; my_ip = gw_ip = 0; dns6_str[0] = '\0';
     v6_routes = v6_svc = v6_blocked = 0; iface_mtu = MTU;
     struct rate_limit rl = {0, 0};
     int64_t last_seen = now_s();                                     /* dernier signe de vie du worker */

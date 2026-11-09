@@ -23,7 +23,8 @@ enum policy_err {
     POLICY_BAD_V6_ROUTER,
     POLICY_BAD_STATUS,
     POLICY_OVERLAP,
-    POLICY_BAD_MTU
+    POLICY_BAD_MTU,
+    POLICY_BAD_V6_DNS
 };
 
 #define POLICY_STATUS_MAX 90
@@ -47,6 +48,10 @@ int policy_check_overlap(uint32_t ip, uint32_t mask, uint32_t other_ip, uint32_t
 #define POLICY_MTU_MIN4 576
 #define POLICY_MTU_MIN6 1280
 int policy_check_mtu(unsigned mtu, int ipv6);
+
+/* Serveur DNS IPv6 annoncé par le téléphone (RDNSS) : adresse globale (2000::/3) ou ULA (fc00::/7) seulement, ni
+ * link-local, ni loopback, ni multicast, ni non spécifiée, et pas notre propre adresse. */
+int policy_check_dns6(const uint8_t dns[16], const uint8_t our_addr[16]);
 
 /* Valeur reçue du téléphone -> MTU à utiliser : 0 si absente ou inférieure à `min` (on garde alors la valeur par
  * défaut), plafonnée à POLICY_MTU_MAX (les tampons du driver ne portent pas plus). */

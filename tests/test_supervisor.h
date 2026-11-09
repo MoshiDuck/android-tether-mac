@@ -212,6 +212,42 @@ static void test_sup_config6(void) {
     CHECK(ncmds == before);
 }
 
+/* DNS IPv6 annoncé par le téléphone (RDNSS) : validé, publié après le DNS IPv4, retiré avec l'IPv6. */
+static void test_sup_dns6(void) {
+    struct ipc_msg rp;
+    int fd = -1;
+    uint8_t d[50];
+    memcpy(d, GLOBAL6, 16); memcpy(d + 16, ROUTER6, 16); putbe16(d + 32, 0);
+    memset(d + 34, 0, 16); d[34] = 0x20; d[35] = 0x01; d[36] = 0x48; d[37] = 0x60; d[38] = 0x48; d[39] = 0x60; d[48] = 0x88; d[49] = 0x88;
+
+    sup_reset();                                                    /* adresse link-local refusée : rien ne change */
+    sup_utun();
+    CHECK(sup_call(msg(IPC_REQ_CONFIG4, CFG4_OK, 16), &rp, &fd) == 1 && rp.status == 0);
+    uint8_t bad[50];
+    memcpy(bad, d, 50); bad[34] = 0xfe; bad[35] = 0x80;
+    CHECK(sup_call(msg(IPC_REQ_CONFIG6, bad, 50), &rp, &fd) == 1 && rp.status == POLICY_BAD_V6_DNS);
+    CHECK(!cfg6_done && dns6_str[0] == '\0');
+
+    CHECK(sup_call(msg(IPC_REQ_CONFIG6, d, 50), &rp, &fd) == 1 && rp.status == 0);
+    CHECK(cfg6_done && !strcmp(dns6_str, "2001:4860:4860::8888"));
+    CHECK(cmd_has("ServerAddresses * 10.217.123.221 2001:4860:4860::8888"));
+    CHECK(cmd_has("set State:/Network/Service/rndis-tether/DNS"));
+
+    int before = ncmds;
+    CHECK(sup_call(msg(IPC_REQ_DECONFIG6, NULL, 0), &rp, &fd) == 1 && rp.status == 0);   /* l'IPv6 disparaît : le DNS IPv6 aussi */
+    CHECK(dns6_str[0] == '\0' && ncmds > before);
+    CHECK(cmd_count("ServerAddresses * 10.217.123.221\n") == 2);                 /* republié sans le DNS IPv6 */
+
+    sup_reset();                                                    /* sans -r : pas de DNS publié, donc rien à compléter */
+    want_route = 0;
+    sup_utun();
+    CHECK(sup_call(msg(IPC_REQ_CONFIG4, CFG4_OK, 16), &rp, &fd) == 1 && rp.status == 0);
+    CHECK(sup_call(msg(IPC_REQ_CONFIG6, d, 50), &rp, &fd) == 1 && rp.status == 0);
+    CHECK(dns6_str[0] == '\0' && !cmd_has("ServerAddresses"));
+    want_route = 1;
+    sup_reset();
+}
+
 /* Avec -r, l'IPv6 ne fuit pas par un autre réseau tant que le tethering n'a pas d'IPv6. */
 static void test_sup_ipv6_leak_guard(void) {
     struct ipc_msg rp;
@@ -1035,6 +1071,7 @@ static void run_supervisor_tests(void) {
     test_sup_overlap();
     test_sup_ipv6_leak_guard();
     test_sup_config6();
+    test_sup_dns6();
     test_sup_mtu();
     test_sup_deconfig6();
     test_worker_limits();

@@ -74,6 +74,14 @@ int policy_check_v6(const uint8_t addr[16], const uint8_t router[16]) {
     return POLICY_OK;
 }
 
+int policy_check_dns6(const uint8_t dns[16], const uint8_t our_addr[16]) {
+    int global = (dns[0] & 0xe0) == 0x20;
+    int ula = (dns[0] & 0xfe) == 0xfc;
+    if (!global && !ula) return POLICY_BAD_V6_DNS;
+    if (!memcmp(dns, our_addr, 16)) return POLICY_BAD_V6_DNS;
+    return POLICY_OK;
+}
+
 static int is_status_char(unsigned char c) {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
            c == ' ' || c == '.' || c == ':' || c == '_' || c == '-';
@@ -117,6 +125,7 @@ const char *policy_strerror(int err) {
     case POLICY_BAD_STATUS: return "état refusé";
     case POLICY_OVERLAP: return "sous-réseau déjà utilisé par ce Mac";
     case POLICY_BAD_MTU: return "MTU refusé";
+    case POLICY_BAD_V6_DNS: return "serveur DNS IPv6 refusé";
     default: return "erreur inconnue";
     }
 }
